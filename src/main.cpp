@@ -219,7 +219,7 @@ static void renderFrame() {
     // 渲染旋转的鸭子 (使用 pushRotateZoom，以 x,y 为旋转中心)
     duckSprite.pushRotateZoom(&canvas, duck.x, duck.y, duck.angle, 1.0f, 1.0f, 0x0001);
     
-    canvas.setTextColor(TFT_DARKGREY); canvas.setCursor(SCREEN_W - 18, 2); canvas.printf("%d", fpsDisplay);
+    //canvas.setTextColor(TFT_DARKGREY); canvas.setCursor(SCREEN_W - 18, 2); canvas.printf("%d", fpsDisplay);
     canvas.pushSprite(0, 0);
 }
 

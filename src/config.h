@@ -63,7 +63,7 @@ static constexpr int SCREEN_H = 135;
 /**
  * [5. 交互与音效配置 - 注入物理交互之魂]
  */
-static constexpr uint8_t SYSTEM_VOLUME     = 240;   // 【系统音量】 0~255
+static constexpr uint8_t SYSTEM_VOLUME     = 255;   // 【系统音量】 0~255
 static constexpr uint8_t SYSTEM_BRIGHTNESS   = 100;   // 【屏幕亮度】 0~255
 static constexpr float   EXPLOSION_FORCE   = 600.0f;// 【爆炸强度】
 static constexpr float   EXPLOSION_RADIUS  = 100.0f; // 【爆炸半径】
