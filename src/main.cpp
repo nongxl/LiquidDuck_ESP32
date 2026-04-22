@@ -98,13 +98,20 @@ static void physicsStep(float dt) {
     duck.lastX = duck.x; duck.lastY = duck.y;
     duck.x += duck.vx * dt; duck.y += duck.vy * dt;
 
-    // 鸭子旋转物理 (不倒翁方案 B: 随 IMU 倾斜，但倾向于正直)
-    float targetAngle = atan2f(imuGX, imuGY + 0.0001f) * (180.0f / M_PI);
-    // 方案 B 的关键：限制最大倾斜感，使其感觉是“不倒翁”
-    if (targetAngle > 45.0f) targetAngle = 45.0f;
-    else if (targetAngle < -45.0f) targetAngle = -45.0f;
+    // 鸭子旋转物理 (全向浮标模式：底座始终指向真实重力)
+    // 增加死区判定：防止平放设备时角度由于传感器噪点乱跳
+    float targetAngle = 0.0f;
+    float magSq = imuGX * imuGX + imuGY * imuGY;
+    if (magSq > 20000.0f) { // 约 0.25G 的水平分量阈值
+        targetAngle = atan2f(-imuGX, imuGY + 0.0001f) * (180.0f / M_PI);
+    }
+    
+    // 计算最短旋转路径，防止 180 度附近的疯狂打圈
+    float angleDiff = targetAngle - duck.angle;
+    while (angleDiff > 180.0f) angleDiff -= 360.0f;
+    while (angleDiff < -180.0f) angleDiff += 360.0f;
 
-    float angleAcc = (targetAngle - duck.angle) * DUCK_ROT_STIFFNESS;
+    float angleAcc = angleDiff * DUCK_ROT_STIFFNESS;
     duck.aVel += angleAcc;
     duck.aVel *= (1.0f - DUCK_ROT_DAMPING);
     duck.angle += duck.aVel;
