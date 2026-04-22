@@ -16,10 +16,10 @@ static constexpr float  GRAVITY_STRENGTH   = 800.0f;// 【重力加速度】 下
 static constexpr float  DAMPING            = 0.992f;// 【运动阻尼】 PBD 模式极其敏感。0.998 为接近真空，0.90 为浓稠糖浆
 static constexpr float  BOUNCE             = 0.98f; // 【反弹弹性】 0.0~1.0。粒子撞击边缘后的反弹力度，越高粒子的活跃跳跃感越强
 static constexpr float  REPULSE_STIFFNESS  = 0.10f; // 【排斥刚度】 粒子抵抗重叠的强度。1.0 为刚体，0.5 具有弹性形感
-static constexpr float  DUCK_GRAVITY_SCALE = 0.30f; // 【鸭子浮力因子】 范围 0.2~0.8。越小鸭子感觉越轻，容易被托浮在粒子堆上方
+static constexpr float  DUCK_GRAVITY_SCALE = 0.40f; // 【鸭子浮力因子】 范围 0.2~0.8。越小鸭子感觉越轻，容易被托浮在粒子堆上方
 static constexpr float  DUCK_FOLLOW_ALPHA  = 0.88f; // 【鸭子随动权重】 范围 0.0~1.0。越大鸭子越容易被粒子流“卷走”，增加交互动态感
 static constexpr float  DUCK_ROT_STIFFNESS = 0.4f;  // 【姿态回归系数】 范围 0.1~2.0。越大鸭子归位越快
-static constexpr float  DUCK_ROT_DAMPING   = 0.20f; // 【姿态回归阻尼】 范围 0.05~0.4。越大摆动越不晃动，增加沉稳感
+static constexpr float  DUCK_ROT_DAMPING   = 0.32f; // 【姿态回归阻尼】 范围 0.05~0.4。越大摆动越不晃动，增加沉稳感
 
 /**
  * [2. 空间网格优化参数 - 高性能碰撞解算核心]
