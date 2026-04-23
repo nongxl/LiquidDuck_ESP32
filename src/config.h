@@ -64,6 +64,28 @@ static constexpr int SCREEN_H = 135;
  * [5. 交互与音效配置 - 注入物理交互之魂]
  */
 static constexpr uint8_t SYSTEM_VOLUME     = 255;   // 【系统音量】 0~255
+
+// ─── 震动配置 ────────────────────────────────────────────────
+/**
+ * 采用"碰撞能量累积 + 低通滤波 + PWM 输出"三段式触觉引擎。
+ */
+static constexpr int    VIBR_PIN           = 8;     // Cardputer 默认震动引脚
+static constexpr int    VIBR_PWM_CHANNEL   = 2;     
+static constexpr int    VIBR_PWM_FREQ      = 10000; 
+static constexpr int    VIBR_PWM_BITS      = 8;     
+
+static constexpr float  VIBR_PARTICLE_W   = 1.0f;  
+static constexpr float  VIBR_BOUNDARY_W   = 2.5f;  
+static constexpr float  VIBR_ENERGY_LIMIT  = 800.0f; 
+static constexpr float  VIBR_V_THRESHOLD   = 40.0f;  
+
+static constexpr float  VIBR_ENERGY_SCALE = 5.0f;    
+static constexpr float  VIBR_LPF_ALPHA    = 0.85f;  
+static constexpr float  VIBR_DECAY        = 0.72f;  
+static constexpr float  VIBR_THRESHOLD    = 30.0f;  
+static constexpr float  VIBR_MIN_PWM      = 30.0f;  
+static constexpr float  VIBR_MAX          = 220.0f; 
+static constexpr uint32_t VIBR_UPDATE_MS  = 16;    
 static constexpr uint8_t SYSTEM_BRIGHTNESS   = 100;   // 【屏幕亮度】 0~255
 static constexpr float   EXPLOSION_FORCE   = 600.0f;// 【爆炸强度】
 static constexpr float   EXPLOSION_RADIUS  = 100.0f; // 【爆炸半径】
