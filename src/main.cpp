@@ -33,6 +33,10 @@ static int16_t  grid[GRID_W][GRID_H][MAX_PER_CELL];
 static uint8_t  gridCount[GRID_W][GRID_H];
 static float    imuGX = 0.0f, imuGY = 0.0f;
 
+// ─── 震动引擎全局状态 ───────────────────────────────────────────
+static float    frameEnergy = 0.0f;  // 当前帧累积的碰撞能量
+static float    vibrLevel   = 0.0f;  // 经低通滤波后的平滑震动强度输出
+
 static M5Canvas canvas(&M5Cardputer.Display);
 static M5Canvas duckSprite(&canvas);
 static M5Canvas ballSprites[2][8];
@@ -68,7 +72,7 @@ static void playKeyTone() {
     int sampleRate = 44100;
     int sampleCount = (int)(sampleRate * durationSec);
     std::vector<int16_t> buffer(sampleCount * 2);
-    float amplitude = 32767.0f * 0.2f; 
+    float amplitude = 32767.0f * 0.85f; 
     for (int i = 0; i < sampleCount; i++) {
         float amp = amplitude;
         if (i > sampleCount - 200) amp *= (float)(sampleCount - i) / 200.0f;
@@ -76,6 +80,29 @@ static void playKeyTone() {
         buffer[i * 2] = val; buffer[i * 2 + 1] = val;
     }
     M5.Speaker.playRaw(buffer.data(), buffer.size(), sampleRate, true, 1, 0);
+}
+
+static void playCollisionSound(float energy) {
+    if (SYSTEM_VOLUME == 0) return;
+    // 根据能量动态决定频率 (1200Hz ~ 2200Hz)
+    float ratio = fminf(1.0f, sqrtf(energy) / sqrtf(VIBR_ENERGY_LIMIT));
+    double freq = 1200.0 + (ratio * 1000.0);
+    float durationSec = 0.015f; 
+    int sampleRate = 44100;
+    int sampleCount = (int)(sampleRate * durationSec);
+    
+    static int16_t colBuffer[800 * 2]; // 静态缓冲区减少分配开销
+    int realCount = min(sampleCount, 800);
+    float amplitude = 32767.0f * (0.3f + ratio * 0.5f); // 撞得越重越响
+    
+    for (int i = 0; i < realCount; i++) {
+        // 极快的线性衰减包络
+        float env = (float)(realCount - i) / realCount;
+        int16_t val = (int16_t)(amplitude * env * sin(2.0 * M_PI * freq * i / sampleRate));
+        colBuffer[i * 2] = val; colBuffer[i * 2 + 1] = val;
+    }
+    // 播放到通道 1
+    M5.Speaker.playRaw(colBuffer, realCount * 2, sampleRate, true, 1, 1);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -148,6 +175,10 @@ static void physicsStep(float dt) {
                         particles[i].y -= ny * overlap * 0.5f;
                         particles[j].x += nx * overlap * 0.5f;
                         particles[j].y += ny * overlap * 0.5f;
+                        // 震动能量采集：粒子间碰撞冲量
+                        if (overlap > 0.1f) {
+                            frameEnergy += overlap * overlap * VIBR_PARTICLE_W;
+                        }
                     }
                 }
             }
@@ -172,10 +203,16 @@ static void physicsStep(float dt) {
 
     float invDt = 1.0f / dt;
     for (int i = 0; i < NUM_PARTICLES; i++) {
-        if (particles[i].x < PARTICLE_RADIUS) particles[i].x = PARTICLE_RADIUS;
-        else if (particles[i].x > SCREEN_W - PARTICLE_RADIUS) particles[i].x = SCREEN_W - PARTICLE_RADIUS;
-        if (particles[i].y < PARTICLE_RADIUS) particles[i].y = PARTICLE_RADIUS;
-        else if (particles[i].y > SCREEN_H - PARTICLE_RADIUS) particles[i].y = SCREEN_H - PARTICLE_RADIUS;
+        // 边界碰撞能量采集（采用门限过滤 + 取单帧最强撞击模式，增加段落感）
+        float bHit = 0.0f;
+        if (particles[i].x < PARTICLE_RADIUS)              { particles[i].x = PARTICLE_RADIUS;              bHit = fabsf(particles[i].vx); }
+        else if (particles[i].x > SCREEN_W - PARTICLE_RADIUS) { particles[i].x = SCREEN_W - PARTICLE_RADIUS; bHit = fabsf(particles[i].vx); }
+        if (particles[i].y < PARTICLE_RADIUS)              { particles[i].y = PARTICLE_RADIUS;              bHit = fmaxf(bHit, fabsf(particles[i].vy)); }
+        else if (particles[i].y > SCREEN_H - PARTICLE_RADIUS) { particles[i].y = SCREEN_H - PARTICLE_RADIUS; bHit = fmaxf(bHit, fabsf(particles[i].vy)); }
+        
+        if (bHit > VIBR_V_THRESHOLD) {
+            frameEnergy = fmaxf(frameEnergy, bHit * bHit * VIBR_BOUNDARY_W);
+        }
 
         float nvx = (particles[i].x - particles[i].lastX) * invDt;
         float nvy = (particles[i].y - particles[i].lastY) * invDt;
@@ -190,6 +227,54 @@ static void physicsStep(float dt) {
     float dnvx = (duck.x - duck.lastX) * invDt * DAMPING;
     float dnvy = (duck.y - duck.lastY) * invDt * DAMPING;
     duck.vx = dnvx; duck.vy = dnvy;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  震动引擎
+// ─────────────────────────────────────────────────────────────
+static void initVibrator() {
+    // 关键：先强制拉低引脚，防止 GPIO 浮空导致上电即震动
+    pinMode(VIBR_PIN, OUTPUT);
+    digitalWrite(VIBR_PIN, LOW);
+    // 再挂载 PWM 通道
+    ledcSetup(VIBR_PWM_CHANNEL, VIBR_PWM_FREQ, VIBR_PWM_BITS);
+    ledcAttachPin(VIBR_PIN, VIBR_PWM_CHANNEL);
+    ledcWrite(VIBR_PWM_CHANNEL, 0); // 确保 PWM 输出为零
+}
+
+static void updateVibrator() {
+    static uint32_t lastVibrMs = 0;
+    uint32_t now = millis();
+    if (now - lastVibrMs < VIBR_UPDATE_MS) return;
+    lastVibrMs = now;
+
+    float target = 0.0f;
+    float currentImpact = 0.0f;
+    if (frameEnergy > 0.0f) {
+        // 应用单帧能量上限，防止大量粒子堆叠导致震动过载
+        currentImpact = fminf(frameEnergy, VIBR_ENERGY_LIMIT);
+        float limitedEnergy = currentImpact; // 保持对后续计算的兼容
+        
+        // 非线性映射：sqrt 压缩
+        target = sqrtf(limitedEnergy) * VIBR_ENERGY_SCALE;
+        target = fminf(target, VIBR_MAX);
+        // 低通滤波平滑
+        vibrLevel = vibrLevel * (1.0f - VIBR_LPF_ALPHA) + target * VIBR_LPF_ALPHA;
+    } else {
+        // 无碰撞时冷却衰减
+        vibrLevel *= VIBR_DECAY;
+    }
+
+    // 阈值过滤 + 最小启动 PWM：确保电机能开始转动
+    uint8_t pwmOut = 0;
+    if (vibrLevel > VIBR_THRESHOLD) {
+        pwmOut = (uint8_t)fminf(fmaxf(vibrLevel, VIBR_MIN_PWM), VIBR_MAX);
+        // [新增] 只有在这一帧确实有物理碰撞时才触发音效
+        if (currentImpact > 0) playCollisionSound(currentImpact);
+    }
+    ledcWrite(VIBR_PWM_CHANNEL, pwmOut);
+
+    frameEnergy = 0.0f; // 采集完成，清零等待下一帧
 }
 
 static void triggerExplosion() {
@@ -235,6 +320,13 @@ static void initParticles() {
 }
 
 void setup() {
+    // ★ 首要任务：在一切初始化之前，将 Hat2 总线所有可能的控制引脚全部强制拉低
+    // 防止 GPIO 浮空导致振动模块上电即启动
+    for (int pin : {0, 1, 7, 8}) {
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+    }
+
     auto cfg = M5.config(); M5Cardputer.begin(cfg, true);
     M5Cardputer.Display.setRotation(1); M5Cardputer.Display.setBrightness(SYSTEM_BRIGHTNESS);
     M5.Speaker.begin(); M5.Speaker.setVolume(SYSTEM_VOLUME);
@@ -254,15 +346,22 @@ void setup() {
             ballSprites[b][i].fillCircle(dia/2 - 2, dia/2 - 2, (b == 0 ? 1 : 2), TFT_WHITE);
         }
     }
+    initVibrator();
     initParticles(); fpsLastMs = millis();
 }
 
 void loop() {
-    M5Cardputer.update();
-    static bool lastPressed = false;
-    bool currentPressed = M5Cardputer.Keyboard.isPressed();
-    if (currentPressed && !lastPressed) triggerExplosion();
-    lastPressed = currentPressed;
+    M5.update(); // 统一使用 M5Unified 的更新逻辑
+    static bool lastKbdPressed = false;
+    
+    // 兼容判定：Cardputer 键盘按下 OR 任何设备的 BtnA (StickS3 正面按键) 按下
+    bool currentKbdPressed = M5Cardputer.Keyboard.isPressed();
+    bool btnAPressed = M5.BtnA.wasPressed();
+    
+    if ((currentKbdPressed && !lastKbdPressed) || btnAPressed) {
+        triggerExplosion();
+    }
+    lastKbdPressed = currentKbdPressed;
 
     if (M5.Imu.isEnabled()) {
         M5.Imu.update(); float ax, ay, az; M5.Imu.getAccel(&ax, &ay, &az);
@@ -275,6 +374,7 @@ void loop() {
     for (int s = 0; s < SUB_STEPS; s++) physicsStep(subDt);
 
     renderFrame();
+    updateVibrator(); // 震动引擎：每帧采集能量并更新 PWM 输出
     fpsCount++; uint32_t now = millis();
     if (now - fpsLastMs >= 1000) { fpsDisplay = fpsCount; fpsCount = 0; fpsLastMs = now; }
 }

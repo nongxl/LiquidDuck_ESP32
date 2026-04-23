@@ -70,3 +70,25 @@ static constexpr float   EXPLOSION_RADIUS  = 100.0f; // 【爆炸半径】
 //static constexpr float   COLLISION_THRESHOLD = 2.4f;// 【碰撞音阈值】
 //static constexpr int     COLLISION_FREQ_BASE = 3000;// 【碰撞音频率】
 
+/**
+ * [6. 触觉反馈配置 - Hat Vibrator 震动模块 (仅 StickS3 有效)]
+ * 采用"碰撞能量累积 + 低通滤波 + PWM 输出"三段式触觉引擎。
+ * 效果：粒子碰撞越剧烈，震动越强烈；静止时平滑衰减至零。
+ */
+static constexpr int    VIBR_PIN           = 0;     // 【震动引脚】 Hat Vibrator Motor 控制线，对应 StickS3 Bus 的 G0
+static constexpr int    VIBR_PWM_CHANNEL   = 2;     // 【PWM 通道】 ledc 通道号，避免与其他外设冲突
+static constexpr int    VIBR_PWM_FREQ      = 10000; // 【PWM 频率】 Hz，建议 5000~20000
+static constexpr int    VIBR_PWM_BITS      = 8;     // 【PWM 位深】 8 位 = 0~255
+
+static constexpr float  VIBR_PARTICLE_W   = 1.0f;  // 【粒子碰撞权重】 粒子间碰撞对总能量的贡献倍率
+static constexpr float  VIBR_BOUNDARY_W   = 2.5f;  // 【边界碰撞权重】 边界碰撞通常更剧烈，给予更高权重
+static constexpr float  VIBR_ENERGY_LIMIT  = 800.0f; // 【能量上限】 调低此值能显著增加多个小球撞击时的“段落感”
+static constexpr float  VIBR_V_THRESHOLD   = 40.0f;  // 【速度触发门限】 过滤平躺堆积时的微小压力，只有速度超过此值才算“撞击”
+
+static constexpr float  VIBR_ENERGY_SCALE = 5.0f;    // 【核心修正】让强度能拉开差距 (sqrt(800)*8.5 ≈ 240)
+static constexpr float  VIBR_LPF_ALPHA    = 0.85f;  // 【低通滤波系数】 保持高响应
+static constexpr float  VIBR_DECAY        = 0.72f;  // 【冷却衰减系数】 保持高段落感
+static constexpr float  VIBR_THRESHOLD    = 30.0f;  // 【最小触发阈值】 配合新量纲调高
+static constexpr float  VIBR_MIN_PWM      = 20.0f;  // 【最小启动 PWM】 降低起始点，换取更大动态
+static constexpr float  VIBR_MAX          = 180.0f;// 【最大震动强度】 限制 PWM 上限，保护电机 (0~255)
+static constexpr uint32_t VIBR_UPDATE_MS  = 16;    // 【更新间隔】 ms，约 60Hz 更新一次 PWM 输出
