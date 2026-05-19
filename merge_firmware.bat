@@ -1,0 +1,1 @@
+esptool --chip esp32s3 merge-bin -o cardputer-factory.bin --flash-mode dio --flash-size 8MB 0x0000 .pio\build\m5stack-sticks3\bootloader.bin 0x8000 .pio\build\m5stack-sticks3\partitions.bin 0xe000 C:\Users\666\.platformio\packages\framework-arduinoespressif32\tools\partitions\boot_app0.bin 0x10000 .pio\build\m5stack-sticks3\firmware.bin

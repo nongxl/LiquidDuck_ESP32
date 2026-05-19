@@ -7,18 +7,22 @@
 #include <vector>
 #include <cmath>
 #include "config.h"      
-#include "duck_asset.h"
+#include "character_assets.h"
+#include "flip.h"
+
+
+// ─────────────────────────────────────────────────────────────
+//  物理模式与数据结构
+// ─────────────────────────────────────────────────────────────
+enum PhysicsMode { MODE_FLIP, MODE_BOTTLE };
+static PhysicsMode currentMode = MODE_FLIP;
+static int currentCharacterIndex = 0; // 当前角色索引
+static uint32_t currentBgColor = COLOR_BG_BLUE; // 当前背景色
+
 
 // ─────────────────────────────────────────────────────────────
 //  数据结构
 // ─────────────────────────────────────────────────────────────
-struct Particle {
-    float x, y;
-    float lastX, lastY;
-    float vx, vy;
-    uint8_t colorIdx;
-};
-
 struct Duck {
     float x, y;
     float lastX, lastY;
@@ -27,11 +31,144 @@ struct Duck {
     float aVel;     // 角速度
 };
 
-static Particle particles[NUM_PARTICLES];
-static Duck     duck;
-static int16_t  grid[GRID_W][GRID_H][MAX_PER_CELL];
-static uint8_t  gridCount[GRID_W][GRID_H];
-static float    imuGX = 0.0f, imuGY = 0.0f;
+static FlipFluid* fluid = nullptr;
+struct Cloud {
+    float x, y;
+    float vx, vy;
+    float size;
+};
+static Cloud clouds[2];
+static Duck  duck;
+static float imuGX = 0.0f, imuGY = 0.0f;
+
+static inline uint16_t rgb32to16(uint32_t c) {
+    uint8_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = (c) & 0xFF;
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+void initClouds() {
+    for (int i = 0; i < 2; i++) {
+        clouds[i].x = random(SCREEN_W);
+        clouds[i].y = random(SCREEN_H);
+        clouds[i].vx = 0;
+        clouds[i].vy = 0;
+        // 分化云朵大小：第一朵较大，第二朵更小
+        if (i == 0) clouds[i].size = 18.0f + random(7); // 大云 (18-25)
+        else        clouds[i].size = 12.0f + random(4);  // 小云 (12-16)
+    }
+}
+
+void updateClouds(float dt) {
+    // 与重力方向 (imuGX, imuGY) 相反的力
+    float ax = -imuGX * 0.15f; 
+    float ay = -imuGY * 0.15f;
+    
+    for (int i = 0; i < 2; i++) {
+        clouds[i].vx += ax * dt;
+        clouds[i].vy += ay * dt;
+        clouds[i].vx *= 0.98f; // 阻尼
+        clouds[i].vy *= 0.98f;
+        
+        clouds[i].x += clouds[i].vx * dt;
+        clouds[i].y += clouds[i].vy * dt;
+        
+        // 边界环绕
+        float margin = clouds[i].size * 2.0f;
+        int cw = (currentMode == MODE_BOTTLE) ? 135 : 240;
+        int ch = (currentMode == MODE_BOTTLE) ? 240 : 135;
+        
+        // 彻底取消所有轴的环绕逻辑，改为全反弹，确保横竖屏下都不会“穿越”
+        if (clouds[i].x < margin / 2.0f) {
+            clouds[i].x = margin / 2.0f;
+            clouds[i].vx *= -0.5f;
+        } else if (clouds[i].x > cw - margin / 2.0f) {
+            clouds[i].x = cw - margin / 2.0f;
+            clouds[i].vx *= -0.5f;
+        }
+
+        if (clouds[i].y < margin / 2.0f) {
+            clouds[i].y = margin / 2.0f;
+            clouds[i].vy *= -0.5f; 
+        } else if (clouds[i].y > ch - margin / 2.0f) {
+            clouds[i].y = ch - margin / 2.0f;
+            clouds[i].vy *= -0.5f;
+        }
+    }
+
+    // 云朵间的碰撞处理（防止重叠）
+    float dx = clouds[1].x - clouds[0].x;
+    float dy = clouds[1].y - clouds[0].y;
+    float d2 = dx*dx + dy*dy;
+    float minDist = (clouds[0].size + clouds[1].size) * 1.2f; 
+    if (d2 < minDist * minDist) {
+        float d = sqrtf(d2); if (d < 0.1f) d = 0.1f;
+        float overlap = (minDist - d) * 0.5f;
+        float nx = dx / d, ny = dy / d;
+        clouds[0].x -= nx * overlap; clouds[0].y -= ny * overlap;
+        clouds[1].x += nx * overlap; clouds[1].y += ny * overlap;
+        
+        // 简单的弹性碰撞：交换部分动量
+        float rvx = clouds[1].vx - clouds[0].vx;
+        float rvy = clouds[1].vy - clouds[0].vy;
+        float velNormal = rvx * nx + rvy * ny;
+        if (velNormal < 0) {
+            float bounce = velNormal * 0.5f;
+            clouds[0].vx += nx * bounce; clouds[0].vy += ny * bounce;
+            clouds[1].vx -= nx * bounce; clouds[1].vy -= ny * bounce;
+        }
+    }
+}
+
+void drawClouds(M5Canvas* cv) {
+    float rad = duck.angle * (M_PI / 180.0f);
+    float s_r = sinf(rad);
+    float c_r = cosf(rad);
+
+    for (int i = 0; i < 2; i++) {
+        uint16_t color = rgb32to16(0xFFFFFF); // 纯白色，在浅蓝背景下更明亮
+        float s = clouds[i].size;
+        float cx = clouds[i].x;
+        float cy = clouds[i].y;
+
+        // 主圆
+        cv->fillCircle(cx, cy, s, color);
+
+        // 旋转两个侧翼圆的偏移量
+        // 原始偏移: 左(-s*0.7, s*0.2), 右(s*0.7, s*0.2)
+        float offX1 = -s * 0.7f, offY1 = s * 0.2f;
+        float offX2 =  s * 0.7f, offY2 = s * 0.2f;
+
+        cv->fillCircle(cx + (offX1 * c_r - offY1 * s_r), cy + (offX1 * s_r + offY1 * c_r), s * 0.8f, color);
+        cv->fillCircle(cx + (offX2 * c_r - offY2 * s_r), cy + (offX2 * s_r + offY2 * c_r), s * 0.8f, color);
+    }
+}
+
+static float flip_h = 0.0f;
+static float flip_tank_w = 0.0f;
+static float flip_tank_h = 0.0f;
+static float flip_scale_x = 1.0f;
+static float flip_scale_y = 1.0f;
+
+static inline float sim_to_screen_x(float sim_x) { return (sim_x - flip_h) * flip_scale_x; }
+static inline float sim_to_screen_y(float sim_y) { return (sim_y - flip_h) * flip_scale_y; }
+static inline float screen_to_sim_x(float sc_x) { return (sc_x / flip_scale_x) + flip_h; }
+static inline float screen_to_sim_y(float sc_y) { return (sc_y / flip_scale_y) + flip_h; }
+
+
+
+static FlipFluid* bottleFluid = nullptr;
+static float* bottleGrid = nullptr;
+
+static uint32_t getFluidColor(float density) {
+    if (density < 0.1f) return OCEAN_PALETTE[0];
+    float factor = density / 20.0f;
+    int idx = (int)(factor * (OCEAN_PALETTE_SIZE - 1));
+    if (idx < 1) idx = 1;
+    if (idx >= OCEAN_PALETTE_SIZE) idx = OCEAN_PALETTE_SIZE - 1;
+    return OCEAN_PALETTE[idx];
+}
+
+static std::vector<uint8_t> particleColors;
 
 // ─── 震动引擎全局状态 ───────────────────────────────────────────
 static float    frameEnergy = 0.0f;  // 当前帧累积的碰撞能量
@@ -41,6 +178,40 @@ static M5Canvas canvas(&M5Cardputer.Display);
 static M5Canvas duckSprite(&canvas);
 static M5Canvas ballSprites[2][8];
 
+// 更新角色精灵图
+void updateCharacterSprite() {
+    const CharacterAsset& asset = CHARACTER_REGISTRY[currentCharacterIndex];
+    duckSprite.deleteSprite();
+    duckSprite.createSprite(asset.width, asset.height);
+    duckSprite.setPivot(asset.width / 2, asset.height / 2);
+    duckSprite.fillSprite(0x0001); // 透明色索引
+    for (int i = 0; i < (asset.width * asset.height); i++) {
+        if (asset.pixels[i] != 0x000000) {
+            duckSprite.drawPixel(i % asset.width, i / asset.width, asset.pixels[i]);
+        }
+    }
+}
+
+// 随机切换主题（背景色与角色同时随机变换）
+void switchTheme() {
+    // 1. 随机背景色 (确保变化)
+    static const uint32_t bgColors[] = {COLOR_BG_BLUE, COLOR_BG_ORANGE, COLOR_BG_GREEN, COLOR_BG_DARKBLUE};
+    uint32_t oldColor = currentBgColor;
+    while (currentBgColor == oldColor) {
+        currentBgColor = bgColors[random(4)];
+    }
+    
+    // 2. 随机角色 (确保变化)
+    int oldIndex = currentCharacterIndex;
+    while (currentCharacterIndex == oldIndex) {
+        currentCharacterIndex = random(CHARACTER_COUNT);
+    }
+    updateCharacterSprite();
+    
+    Serial.printf("Theme Switched: Color=0x%06X, Character=%s\n", 
+                  currentBgColor, CHARACTER_REGISTRY[currentCharacterIndex].name);
+}
+
 static uint32_t fpsLastMs = 0;
 static int      fpsCount = 0, fpsDisplay = 0;
 
@@ -49,10 +220,6 @@ static const std::vector<int> C_MAJOR_SCALE = {60, 62, 64, 65, 67, 69, 71};
 // ─────────────────────────────────────────────────────────────
 //  辅助渲染工具
 // ─────────────────────────────────────────────────────────────
-static inline uint16_t rgb32to16(uint32_t c) {
-    uint8_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = (c) & 0xFF;
-    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-}
 
 static uint16_t getBrightened16(uint32_t c, float f) {
     uint8_t r = (uint8_t)min(255.0f, ((c >> 16) & 0xFF) * f);
@@ -109,124 +276,161 @@ static void playCollisionSound(float energy) {
 //  物理核心
 // ─────────────────────────────────────────────────────────────
 inline float distSq(float dx, float dy) { return dx * dx + dy * dy; }
-inline void gridClear() { memset(gridCount, 0, sizeof(gridCount)); }
 
-static void physicsStep(float dt) {
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        particles[i].vx += imuGX * dt;
-        particles[i].vy += imuGY * dt;
-        particles[i].lastX = particles[i].x;
-        particles[i].lastY = particles[i].y;
-        particles[i].x += particles[i].vx * dt;
-        particles[i].y += particles[i].vy * dt;
+
+
+
+static void physicsStepBOTTLE(float dt) {
+    if (!bottleFluid) return;
+    float ax, ay, az;
+    M5.Imu.getAccel(&ax, &ay, &az);
+    float gx = -ay;
+    float gy = -ax;
+    if (fabsf(gx) < IMU_DEADZONE) gx = 0;
+    if (fabsf(gy) < IMU_DEADZONE) gy = 0;
+
+    float sub_dt = dt * 0.5f;
+    flip_step(bottleFluid, sub_dt, gx, gy);
+    flip_step(bottleFluid, sub_dt, gx, gy);
+    flip_get_led_grid(bottleFluid, bottleGrid, FLUID_WIDTH_BOTTLE, FLUID_HEIGHT_BOTTLE);
+    
+    float accelMag = sqrtf(ax*ax + ay*ay + az*az);
+    float currentShake = fabsf(accelMag - 1.0f);
+    if (currentShake > 0.5f) {
+        frameEnergy = fmaxf(frameEnergy, currentShake * 100.0f);
     }
+}
+
+static void renderFrameBOTTLE() {
+    canvas.fillSprite(rgb32to16(0x00060E)); // 恢复海水模式的深色背景
+    float cellW = 135.0f / FLUID_WIDTH_BOTTLE;
+    float cellH = 240.0f / FLUID_HEIGHT_BOTTLE;
+    for (int x = 0; x < FLUID_WIDTH_BOTTLE; x++) {
+        for (int y = 0; y < FLUID_HEIGHT_BOTTLE; y++) {
+            float density = bottleGrid[x * FLUID_HEIGHT_BOTTLE + y];
+            if (density > 0.1f) {
+                uint32_t color = getFluidColor(density);
+                canvas.fillRect(lrintf(x * cellW), lrintf(y * cellH), (int)ceilf(cellW), (int)ceilf(cellH), rgb32to16(color));
+            }
+        }
+    }
+    canvas.pushSprite(0, 0);
+}
+
+static void triggerExplosionFLIP() {
+    if (!fluid) return;
+    int num; float *pos, *vel;
+    flip_get_particles(fluid, &num, &pos, &vel);
+    if (num <= 0) return;
+    int target = random(num);
+    float ex = pos[2*target+0]; float ey = pos[2*target+1];
+    float rSq = EXPLOSION_RADIUS * EXPLOSION_RADIUS;
+    for (int i = 0; i < num; i++) {
+        float dx = pos[2*i+0] - ex; float dy = pos[2*i+1] - ey;
+        float d2 = dx*dx + dy*dy;
+        if (d2 < rSq && d2 > 0.01f) {
+            float d = sqrtf(d2); float f = (EXPLOSION_RADIUS - d) / EXPLOSION_RADIUS * EXPLOSION_FORCE;
+            vel[2*i+0] += (dx/d)*f; vel[2*i+1] += (dy/d)*f;
+        }
+    }
+    duck.vx += (duck.x - ex) * 2.0f; duck.vy += (duck.y - ey) * 2.0f; 
+    duck.aVel += (random(60) - 30); // 爆炸时给一个随机角速度
+    playKeyTone();
+}
+
+static void renderFrameFLIP() {
+    canvas.fillSprite(rgb32to16(currentBgColor));
+    drawClouds(&canvas); // 恢复海洋球模式下的云朵
+    const float glintIdxSq = SPEED_GLINT_THRESHOLD * SPEED_GLINT_THRESHOLD;
+    
+    if (fluid) {
+        int num; float *pos, *vel;
+        flip_get_particles(fluid, &num, &pos, &vel);
+        float pRadius = flip_get_particle_radius(fluid);
+        for (int i = 0; i < num; i++) {
+            float vx = vel[2*i+0], vy = vel[2*i+1];
+            float v2 = vx*vx + vy*vy;
+            uint8_t cIdx = (i < particleColors.size()) ? particleColors[i] : 0;
+            float px = sim_to_screen_x(pos[2*i+0]);
+            float py = sim_to_screen_y(pos[2*i+1]);
+            ballSprites[(v2 > glintIdxSq) ? 1 : 0][cIdx].pushSprite(&canvas, (int)(px - pRadius), (int)(py - pRadius), 0x0001);
+        }
+    }
+    // 渲染旋转的鸭子 (使用 pushRotateZoom，以 x,y 为旋转中心)
+    float dx = sim_to_screen_x(duck.x);
+    float dy = sim_to_screen_y(duck.y);
+    duckSprite.pushRotateZoom(&canvas, dx, dy, duck.angle, 1.0f, 1.0f, 0x0001);
+    
+    //canvas.setTextColor(TFT_DARKGREY); canvas.setCursor(SCREEN_W - 18, 2); canvas.printf("%d", fpsDisplay);
+    canvas.pushSprite(0, 0);
+}
+
+extern float flip_boundary_energy;
+
+static void physicsStepFLIP(float dt) {
+    if (!fluid) return;
+
+    flip_step(fluid, dt, imuGX, imuGY);
+
+    if (flip_boundary_energy > VIBR_V_THRESHOLD) {
+        frameEnergy = fmaxf(frameEnergy, flip_boundary_energy * flip_boundary_energy * VIBR_BOUNDARY_W);
+    }
+    flip_boundary_energy = 0.0f;
+
     duck.vx += imuGX * DUCK_GRAVITY_SCALE * dt;
     duck.vy += imuGY * DUCK_GRAVITY_SCALE * dt;
     duck.lastX = duck.x; duck.lastY = duck.y;
     duck.x += duck.vx * dt; duck.y += duck.vy * dt;
 
-    // 鸭子旋转物理 (全向浮标模式：底座始终指向真实重力)
-    // 增加死区判定：防止平放设备时角度由于传感器噪点乱跳
-    float targetAngle = 0.0f;
-    float magSq = imuGX * imuGX + imuGY * imuGY;
-    if (magSq > 20000.0f) { // 约 0.25G 的水平分量阈值
-        targetAngle = atan2f(-imuGX, imuGY + 0.0001f) * (180.0f / M_PI);
-    }
-    
-    // 计算最短旋转路径，防止 180 度附近的疯狂打圈
-    float angleDiff = targetAngle - duck.angle;
-    while (angleDiff > 180.0f) angleDiff -= 360.0f;
-    while (angleDiff < -180.0f) angleDiff += 360.0f;
+    int num; float *pos, *vel;
+    flip_get_particles(fluid, &num, &pos, &vel);
+    float pRadius = flip_get_particle_radius(fluid);
 
-    float angleAcc = angleDiff * DUCK_ROT_STIFFNESS;
-    duck.aVel += angleAcc;
-    duck.aVel *= (1.0f - DUCK_ROT_DAMPING);
-    duck.angle += duck.aVel;
-
-    gridClear();
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        int cx = (int)(particles[i].x / CELL_SIZE), cy = (int)(particles[i].y / CELL_SIZE);
-        if (cx >= 0 && cx < GRID_W && cy >= 0 && cy < GRID_H) {
-            if (gridCount[cx][cy] < MAX_PER_CELL) grid[cx][cy][gridCount[cx][cy]++] = (int16_t)i;
-        }
-    }
-
-    const float minDist = PARTICLE_RADIUS * 2.0f;
-    const float minDistSq = minDist * minDist;
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        float px = particles[i].x, py = particles[i].y;
-        int cx0 = max(0, (int)(px / CELL_SIZE) - 1);
-        int cy0 = max(0, (int)(py / CELL_SIZE) - 1);
-        int cx1 = min(GRID_W - 1, cx0 + 2);
-        int cy1 = min(GRID_H - 1, cy0 + 2);
-
-        for (int cx = cx0; cx <= cx1; cx++) {
-            for (int cy = cy0; cy <= cy1; cy++) {
-                for (int k = 0; k < gridCount[cx][cy]; k++) {
-                    int j = grid[cx][cy][k];
-                    if (j <= i) continue;
-                    float dx = particles[j].x - px, dy = particles[j].y - py;
-                    float d2 = distSq(dx, dy);
-                    if (d2 < minDistSq) {
-                        float d = sqrtf(d2); if (d < 0.01f) d = 0.1f;
-                        float overlap = (minDist - d);
-                        float nx = dx / d, ny = dy / d;
-                        particles[i].x -= nx * overlap * 0.5f;
-                        particles[i].y -= ny * overlap * 0.5f;
-                        particles[j].x += nx * overlap * 0.5f;
-                        particles[j].y += ny * overlap * 0.5f;
-                        // 震动能量采集：粒子间碰撞冲量
-                        if (overlap > 0.1f) {
-                            frameEnergy += overlap * overlap * VIBR_PARTICLE_W;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    const float duckMinDist = DUCK_RADIUS + PARTICLE_RADIUS;
+    const float charRadius = CHARACTER_REGISTRY[currentCharacterIndex].radius;
+    const float duckMinDist = charRadius + pRadius;
     const float duckMinDistSq = duckMinDist * duckMinDist;
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        float dx = particles[i].x - duck.x, dy = particles[i].y - duck.y;
+    
+    for (int i = 0; i < num; i++) {
+        float dx = pos[2*i+0] - duck.x, dy = pos[2*i+1] - duck.y;
         float d2 = distSq(dx, dy);
         if (d2 < duckMinDistSq) {
             float d = sqrtf(d2); if (d < 0.01f) d = 0.1f;
             float overlap = (duckMinDist - d);
             float nx = dx / d, ny = dy / d;
-            particles[i].x += nx * overlap * 0.95f;
-            particles[i].y += ny * overlap * 0.95f;
+            pos[2*i+0] += nx * overlap * 0.95f;
+            pos[2*i+1] += ny * overlap * 0.95f;
+            
+            // ✨ 核心注入：当鸭子排斥海洋球时，附加一个弹射速度，彻底激活“撞击溅射感”！
+            vel[2*i+0] += nx * overlap * 25.0f;
+            vel[2*i+1] += ny * overlap * 25.0f;
+            
             duck.x -= nx * overlap * 0.05f;
             duck.y -= ny * overlap * 0.05f;
+            if (overlap > 0.1f) {
+                frameEnergy += overlap * overlap * VIBR_PARTICLE_W;
+            }
         }
     }
+
+    // 鸭子的物理边界必须和 FLIP 流体的物理边界保持一致，否则会“卡”在流体底部的 padding 中无法上浮。
+    // 在 FLIP 中，流体被限制在距离边缘 h (也就是 pRadius / 0.35) 的范围内。
+    float duckMinX = flip_h + charRadius;
+    float duckMaxX = flip_tank_w - charRadius;
+    float duckMinY = flip_h + charRadius;
+    float duckMaxY = flip_tank_h - charRadius;
+
+    if (duck.x < duckMinX) { duck.x = duckMinX; duck.vx *= -0.5f; }
+    else if (duck.x > duckMaxX) { duck.x = duckMaxX; duck.vx *= -0.5f; }
+    if (duck.y < duckMinY) { duck.y = duckMinY; duck.vy *= -0.5f; }
+    else if (duck.y > duckMaxY) { duck.y = duckMaxY; duck.vy *= -0.5f; }
+    
+
 
     float invDt = 1.0f / dt;
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        // 边界碰撞能量采集（采用门限过滤 + 取单帧最强撞击模式，增加段落感）
-        float bHit = 0.0f;
-        if (particles[i].x < PARTICLE_RADIUS)              { particles[i].x = PARTICLE_RADIUS;              bHit = fabsf(particles[i].vx); }
-        else if (particles[i].x > SCREEN_W - PARTICLE_RADIUS) { particles[i].x = SCREEN_W - PARTICLE_RADIUS; bHit = fabsf(particles[i].vx); }
-        if (particles[i].y < PARTICLE_RADIUS)              { particles[i].y = PARTICLE_RADIUS;              bHit = fmaxf(bHit, fabsf(particles[i].vy)); }
-        else if (particles[i].y > SCREEN_H - PARTICLE_RADIUS) { particles[i].y = SCREEN_H - PARTICLE_RADIUS; bHit = fmaxf(bHit, fabsf(particles[i].vy)); }
-        
-        if (bHit > VIBR_V_THRESHOLD) {
-            frameEnergy = fmaxf(frameEnergy, bHit * bHit * VIBR_BOUNDARY_W);
-        }
-
-        float nvx = (particles[i].x - particles[i].lastX) * invDt;
-        float nvy = (particles[i].y - particles[i].lastY) * invDt;
-        float v2 = nvx*nvx + nvy*nvy;
-        if (v2 < 0.2f) { nvx = 0; nvy = 0; } else { nvx *= DAMPING; nvy *= DAMPING; }
-        particles[i].vx = nvx; particles[i].vy = nvy;
-    }
-
-    if (duck.x < DUCK_RADIUS) duck.x = DUCK_RADIUS; else if (duck.x > SCREEN_W - DUCK_RADIUS) duck.x = SCREEN_W - DUCK_RADIUS;
-    if (duck.y < DUCK_RADIUS) duck.y = DUCK_RADIUS; else if (duck.y > SCREEN_H - DUCK_RADIUS) duck.y = SCREEN_H - DUCK_RADIUS;
-    
-    float dnvx = (duck.x - duck.lastX) * invDt * DAMPING;
-    float dnvy = (duck.y - duck.lastY) * invDt * DAMPING;
-    duck.vx = dnvx; duck.vy = dnvy;
+    float dnvx = (duck.x - duck.lastX) * invDt;
+    float dnvy = (duck.y - duck.lastY) * invDt;
+    duck.vx = dnvx * 0.98f; 
+    duck.vy = dnvy * 0.98f;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -277,45 +481,34 @@ static void updateVibrator() {
     frameEnergy = 0.0f; // 采集完成，清零等待下一帧
 }
 
-static void triggerExplosion() {
-    int target = random(NUM_PARTICLES);
-    float ex = particles[target].x; float ey = particles[target].y;
-    float rSq = EXPLOSION_RADIUS * EXPLOSION_RADIUS;
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        float dx = particles[i].x - ex; float dy = particles[i].y - ey;
-        float d2 = dx*dx + dy*dy;
-        if (d2 < rSq && d2 > 0.01f) {
-            float d = sqrtf(d2); float f = (EXPLOSION_RADIUS - d) / EXPLOSION_RADIUS * EXPLOSION_FORCE;
-            particles[i].vx += (dx/d)*f; particles[i].vy += (dy/d)*f;
+static void initParticlesFLIP() {
+    if (fluid) flip_destroy(fluid);
+    fluid = flip_create(SCREEN_W, SCREEN_H, FLIP_GRID_W, FLIP_GRID_H, FLUID_FILL_RATIO);
+    if (fluid) {
+        flip_set_gravity_scale(fluid, 1.0f);
+        flip_set_solver_quality(fluid, FLIP_PUSH_ITERS, FLIP_PRESSURE_ITERS, FLIP_RATIO);
+        
+        int num;
+        flip_get_particles(fluid, &num, nullptr, nullptr);
+        particleColors.resize(num);
+        for(int i=0; i<num; i++) {
+            particleColors[i] = (uint8_t)random(8);
         }
     }
-    duck.vx += (duck.x - ex) * 2.0f; duck.vy += (duck.y - ey) * 2.0f; 
-    duck.aVel += (random(60) - 30); // 爆炸时给一个随机角速度
-    playKeyTone();
-}
-
-static void renderFrame() {
-    canvas.fillSprite(rgb32to16(COLOR_BG));
-    const float glintIdxSq = SPEED_GLINT_THRESHOLD * SPEED_GLINT_THRESHOLD;
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        float v2 = particles[i].vx * particles[i].vx + particles[i].vy * particles[i].vy;
-        ballSprites[(v2 > glintIdxSq) ? 1 : 0][particles[i].colorIdx].pushSprite(&canvas, (int)particles[i].x - (int)PARTICLE_RADIUS, (int)particles[i].y - (int)PARTICLE_RADIUS, 0x0001);
-    }
-    // 渲染旋转的鸭子 (使用 pushRotateZoom，以 x,y 为旋转中心)
-    duckSprite.pushRotateZoom(&canvas, duck.x, duck.y, duck.angle, 1.0f, 1.0f, 0x0001);
     
-    //canvas.setTextColor(TFT_DARKGREY); canvas.setCursor(SCREEN_W - 18, 2); canvas.printf("%d", fpsDisplay);
-    canvas.pushSprite(0, 0);
-}
+    int sim_num_x_d = FLIP_GRID_W + 2;
+    int sim_num_y_d = FLIP_GRID_H + 2;
+    float hx_d = (float)SCREEN_W / (sim_num_x_d - 1);
+    float hy_d = (float)SCREEN_H / (sim_num_y_d - 1);
+    flip_h = fminf(hx_d, hy_d);
+    flip_tank_w = flip_h * (sim_num_x_d - 1);
+    flip_tank_h = flip_h * (sim_num_y_d - 1);
+    flip_scale_x = (float)SCREEN_W / (flip_tank_w - flip_h);
+    flip_scale_y = (float)SCREEN_H / (flip_tank_h - flip_h);
 
-static void initParticles() {
-    int cols = (int)(SCREEN_W / (PARTICLE_RADIUS * 2.5f));
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        particles[i].x = particles[i].lastX = PARTICLE_RADIUS * 1.5f + (i % cols) * (PARTICLE_RADIUS * 2.5f);
-        particles[i].y = particles[i].lastY = PARTICLE_RADIUS * 1.5f + (i / cols) * (PARTICLE_RADIUS * 2.5f);
-        particles[i].vx = (random(10) - 5) * 5.0f; particles[i].vy = 0.0f; particles[i].colorIdx = (uint8_t)random(8);
-    }
-    duck.x = duck.lastX = SCREEN_W / 2.0f; duck.y = duck.lastY = DUCK_RADIUS + 5.0f; 
+    float startRadius = CHARACTER_REGISTRY[0].radius;
+    duck.x = duck.lastX = screen_to_sim_x(SCREEN_W / 2.0f); 
+    duck.y = duck.lastY = screen_to_sim_y(startRadius + 5.0f); 
     duck.vx = duck.vy = 0.0f; duck.angle = duck.aVel = 0.0f;
 }
 
@@ -331,11 +524,29 @@ void setup() {
     M5Cardputer.Display.setRotation(1); M5Cardputer.Display.setBrightness(SYSTEM_BRIGHTNESS);
     M5.Speaker.begin(); M5.Speaker.setVolume(SYSTEM_VOLUME);
     canvas.createSprite(SCREEN_W, SCREEN_H); M5.Imu.init();
-    duckSprite.createSprite(DUCK_WIDTH, DUCK_HEIGHT); duckSprite.setPivot(DUCK_WIDTH/2, DUCK_HEIGHT/2); // 设置旋转轴心
-    duckSprite.fillSprite(0x0001);
-    for (int i = 0; i < (DUCK_WIDTH * DUCK_HEIGHT); i++) if (duck_pixels[i] != 0x000000) duckSprite.drawPixel(i % DUCK_WIDTH, i / DUCK_WIDTH, duck_pixels[i]);
     
-    int dia = (int)(PARTICLE_RADIUS * 2.0f);
+    // 初始化随机数种子，增加随机性
+    randomSeed(millis() + M5.Imu.getAccel(&imuGX, &imuGY, &imuGX)); 
+    
+    updateCharacterSprite();
+    Serial.printf("System Initialized. Character Count: %d\n", CHARACTER_COUNT);
+    
+    initClouds();
+    initParticlesFLIP();
+    float simW = 1.0f;
+    float simH = simW * ((float)FLUID_HEIGHT_BOTTLE / (float)FLUID_WIDTH_BOTTLE);
+    bottleFluid = flip_create(simW, simH, FLUID_WIDTH_BOTTLE, FLUID_HEIGHT_BOTTLE, FLUID_FILL_RATIO_BOTTLE);
+    if (bottleFluid) {
+        flip_set_gravity_scale(bottleFluid, FLUID_GRAVITY_BOTTLE);
+        flip_set_solver_quality(bottleFluid, 1, 12, 0.9f);
+    }
+    bottleGrid = (float*)malloc(sizeof(float) * FLUID_WIDTH_BOTTLE * FLUID_HEIGHT_BOTTLE);
+
+    
+    float pRadius = flip_get_particle_radius(fluid);
+    int dia = (int)(pRadius * 2.4f);
+    if (dia < 2) dia = 2;
+
     for (int i = 0; i < 8; i++) {
         uint32_t c = NEON_PALETTE[i];
         for (int b = 0; b < 2; b++) {
@@ -343,11 +554,11 @@ void setup() {
             float f = (b == 0) ? 1.0f : 1.6f; 
             ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2, getBrightened16(c, f * 0.7f));
             ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2 - 1, getBrightened16(c, f * 1.15f));
-            ballSprites[b][i].fillCircle(dia/2 - 2, dia/2 - 2, (b == 0 ? 1 : 2), TFT_WHITE);
+            ballSprites[b][i].fillCircle(dia/2 - 1, dia/2 - 1, (b == 0 ? 1 : 2), TFT_WHITE);
         }
     }
     initVibrator();
-    initParticles(); fpsLastMs = millis();
+    fpsLastMs = millis();
 }
 
 void loop() {
@@ -359,21 +570,144 @@ void loop() {
     bool btnAPressed = M5.BtnA.wasPressed();
     
     if ((currentKbdPressed && !lastKbdPressed) || btnAPressed) {
-        triggerExplosion();
+        switch (currentMode) {
+            case MODE_FLIP: triggerExplosionFLIP(); break;
+            default: break;
+        }
     }
     lastKbdPressed = currentKbdPressed;
 
-    if (M5.Imu.isEnabled()) {
-        M5.Imu.update(); float ax, ay, az; M5.Imu.getAccel(&ax, &ay, &az);
-        float targetGX = (-ax) * GRAVITY_STRENGTH, targetGY = ay * GRAVITY_STRENGTH;
-        if (abs(targetGX - imuGX) > 1.5f) imuGX = imuGX * (1.0f - IMU_LPF_ALPHA) + targetGX * IMU_LPF_ALPHA;
-        if (abs(targetGY - imuGY) > 1.5f) imuGY = imuGY * (1.0f - IMU_LPF_ALPHA) + targetGY * IMU_LPF_ALPHA;
+    static uint32_t lastLoopMs = millis();
+    uint32_t nowLoop = millis();
+    float dt = (nowLoop - lastLoopMs) / 1000.0f;
+    if (dt > 0.033f) dt = 0.033f; // 限制最大步长
+    if (dt <= 0.0f) dt = 0.001f;
+    lastLoopMs = nowLoop;
+
+    // ─────────────────────────────────────────────────────────────
+    //  按键交互逻辑 (BtnB: 短按切主题，长按切模式)
+    // ─────────────────────────────────────────────────────────────
+    static bool btnBLongPressed = false;
+    
+    // 处理按下过程中的长按判定
+    if (M5.BtnB.isPressed()) {
+        if (!btnBLongPressed && M5.BtnB.pressedFor(LONG_PRESS_MS)) {
+            btnBLongPressed = true;
+            // 长按：切换模式
+            currentMode = (currentMode == MODE_FLIP) ? MODE_BOTTLE : MODE_FLIP;
+            if (currentMode == MODE_BOTTLE) {
+                M5Cardputer.Display.setRotation(0);
+                canvas.deleteSprite();
+                canvas.createSprite(135, 240);
+            } else {
+                M5Cardputer.Display.setRotation(1);
+                if (canvas.width() != 240) {
+                    canvas.deleteSprite();
+                    canvas.createSprite(240, 135);
+                }
+            }
+            duck.x = duck.lastX = screen_to_sim_x(240 / 2.0f);
+            duck.y = duck.lastY = screen_to_sim_y(135 / 2.0f);
+            duck.vx = duck.vy = 0.0f;
+            frameEnergy = 0.0f;
+            vibrLevel = 0.0f;
+            playKeyTone(); // 给个声音反馈
+            Serial.println("Mode Switched via Long Press");
+        }
     }
     
-    float subDt = FIXED_DT / (float)SUB_STEPS;
-    for (int s = 0; s < SUB_STEPS; s++) physicsStep(subDt);
+    // 处理释放时的逻辑
+    if (M5.BtnB.wasReleased()) {
+        if (!btnBLongPressed) {
+            // 短按：仅在海洋球模式下切换主题
+            if (currentMode == MODE_FLIP) {
+                switchTheme();
+                playKeyTone();
+            }
+        }
+        btnBLongPressed = false; // 重置长按标志
+    }
 
-    renderFrame();
+    if (M5.Imu.isEnabled()) {
+        M5.Imu.update(); float ax, ay, az; M5.Imu.getAccel(&ax, &ay, &az);
+        
+        // ── 休眠逻辑 ──────────────────────────────────────────────
+        static bool isSleeping = false;
+        static float lastAx = 0.0f, lastAy = 0.0f, lastAz = 0.0f;
+        static uint32_t lastMotionMs = millis();
+
+        float deltaA = sqrtf(powf(ax - lastAx, 2) + powf(ay - lastAy, 2) + powf(az - lastAz, 2));
+        lastAx = ax; lastAy = ay; lastAz = az;
+
+        bool isCharging = M5.Power.isCharging();
+        bool hasInput = M5Cardputer.Keyboard.isPressed() || M5.BtnA.wasPressed() || M5.BtnB.wasPressed();
+
+        if (isSleeping) {
+            if (deltaA > WAKE_IMU_THRESHOLD || hasInput) {
+                isSleeping = false;
+                M5Cardputer.Display.wakeup();
+                M5Cardputer.Display.setBrightness(SYSTEM_BRIGHTNESS);
+                lastMotionMs = millis();
+            } else {
+                delay(50);
+                return;
+            }
+        } else {
+            if (deltaA > SLEEP_IMU_THRESHOLD || hasInput || isCharging) {
+                lastMotionMs = millis();
+            }
+
+            if (millis() - lastMotionMs > SLEEP_TIMEOUT_MS) {
+                isSleeping = true;
+                M5Cardputer.Display.setBrightness(0);
+                M5Cardputer.Display.sleep();
+                return;
+            }
+        }
+
+        float rawX = -ax;
+        float rawY = ay;
+        
+        // 【死区过滤】完全复刻原项目的静止防沸腾机制
+        if (fabsf(rawX) < IMU_DEADZONE) rawX = 0.0f;
+        if (fabsf(rawY) < IMU_DEADZONE) rawY = 0.0f;
+        
+        float targetGX = rawX * GRAVITY_STRENGTH;
+        float targetGY = rawY * GRAVITY_STRENGTH;
+        
+        // 【低通滤波】恢复传感器的平滑过滤，防止微小噪点引发的持续抖动
+        if (abs(targetGX - imuGX) > 1.5f) imuGX = imuGX * (1.0f - IMU_LPF_ALPHA) + targetGX * IMU_LPF_ALPHA;
+        if (abs(targetGY - imuGY) > 1.5f) imuGY = imuGY * (1.0f - IMU_LPF_ALPHA) + targetGY * IMU_LPF_ALPHA;
+
+        // 统一更新旋转角度，供小黄鸭和云朵同步使用
+        float targetAngle = 0.0f;
+        float mSq = imuGX * imuGX + imuGY * imuGY;
+        if (mSq > 100.0f) { 
+            targetAngle = atan2f(-imuGX, imuGY + 0.0001f) * (180.0f / M_PI);
+        }
+        
+        float angleDiff = targetAngle - duck.angle;
+        while (angleDiff > 180.0f) angleDiff -= 360.0f;
+        while (angleDiff < -180.0f) angleDiff += 360.0f;
+
+        float angleAcc = angleDiff * DUCK_ROT_STIFFNESS;
+        duck.aVel += angleAcc;
+        duck.aVel *= (1.0f - DUCK_ROT_DAMPING);
+        duck.angle += duck.aVel;
+    }
+    
+    updateClouds(dt);
+    // 使用真实时间步长，确保不会因为降帧而变成“慢动作”
+    if (currentMode == MODE_FLIP) {
+        float flipDt = dt * 0.5f;
+        physicsStepFLIP(flipDt);
+        physicsStepFLIP(flipDt);
+    } else {
+        physicsStepBOTTLE(dt);
+    }
+
+    if (currentMode == MODE_FLIP) renderFrameFLIP();
+    else renderFrameBOTTLE();
     updateVibrator(); // 震动引擎：每帧采集能量并更新 PWM 输出
     fpsCount++; uint32_t now = millis();
     if (now - fpsLastMs >= 1000) { fpsDisplay = fpsCount; fpsCount = 0; fpsLastMs = now; }
