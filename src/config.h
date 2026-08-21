@@ -40,7 +40,7 @@ static constexpr uint32_t LONG_PRESS_MS    = 500;      // 【长按阈值】 毫
 static constexpr float  SPEED_GLINT_THRESHOLD = 240.0f;// 【闪烁阈值】 限制切换到高光状态的速度门限。越小越灵敏，越大越沉稳。
 
 // ─────────────────────────────────────────────────────────────
-//  海洋球多主题系统配置 (支持 FluidBox 水流配色与多种晶莹主题)
+//  海洋球多主题系统配置 (支持蔚蓝水流配色与多种晶莹主题)
 // ─────────────────────────────────────────────────────────────
 struct BallTheme {
     const char* name;
@@ -64,20 +64,21 @@ static const uint32_t NEON_PALETTE[8] = {
 // 预设主题列表
 static const BallTheme BALL_THEMES[] = {
     {
-        "FluidBox Water", // 【FluidBox 经典水体】：严格还原 esp32-fluidbox 的 4-stop 水流梯度
+        "Ocean Water", // 【蔚蓝海洋水体】：深蓝到浪花白的连续梯度水色
         COLOR_BG_CYAN,
         {
-            0x0A2DA5, // Stop 0: 深海静水
+            0x0A2DA5, // 深海静水
             0x216ADA, // 深蓝水流
             0x3989ED, // 蔚蓝水体
             0x63A8F3, // 清澈天蓝
             0x86C2F8, // 浅蓝波浪
             0xAED8FB, // 晶亮浪花
             0xD8EDFD, // 泛白水沫
-            0xFFFFFF  // Stop 3: 纯白飞溅
+            0xFFFFFF  // 纯白飞溅
         },
         true // 速度超限时激起纯白水花
     },
+
     {
         "Neon Crystal", // 【极光霓虹晶体】：多彩高饱和度晶莹小球
         COLOR_BG_BLUE,

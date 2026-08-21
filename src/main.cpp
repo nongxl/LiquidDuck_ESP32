@@ -300,7 +300,7 @@ static uint16_t getBrightened16(uint32_t c, float f) {
     return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
 }
 
-static int currentBallThemeIndex = 0; // 当前海洋球小球主题 (默认 0: FluidBox Water)
+static int currentBallThemeIndex = 0; // 当前海洋球小球主题 (默认 0: Ocean Water)
 
 // 刷新小球精灵图的颜色与高光
 void updateBallSprites(int themeIndex) {
@@ -318,11 +318,12 @@ void updateBallSprites(int themeIndex) {
             }
             ballSprites[b][i].fillSprite(0x0001);
             if (b == 1 && theme.speedHighlightWhite) {
-                // 超速纯白水花模式 (类似 FluidBox 浪花飞溅)
+                // 超速纯白水花模式 (浪花飞溅效果)
                 ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2, rgb32to16(0x96CDFA));
                 ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2 - 1, rgb32to16(0xD8EDFD));
                 ballSprites[b][i].fillCircle(dia/2 - 1, dia/2 - 1, 2, TFT_WHITE);
             } else {
+
                 float f = (b == 0) ? 1.0f : 1.6f; 
                 ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2, getBrightened16(c, f * 0.7f));
                 ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2 - 1, getBrightened16(c, f * 1.15f));
