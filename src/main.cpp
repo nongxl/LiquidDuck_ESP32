@@ -377,31 +377,100 @@ static int      fpsCount = 0, fpsDisplay = 0;
 static const std::vector<int> C_MAJOR_SCALE = {60, 62, 64, 65, 67, 69, 71};
 
 // ─────────────────────────────────────────────────────────────
-//  电量显示 HUD (按 BtnB 触发，3秒后自动消失)
+//  电量显示 HUD (按 BtnB 触发，3秒后自动消失，重力自适应方位与低通平滑滤波)
 // ─────────────────────────────────────────────────────────────
 static uint32_t batteryShowUntilMs = 0;
+static float    filteredBatteryPercent = -1.0f;
+static int      displayBattLevel = -1;
+static uint32_t lastBattSampleMs = 0;
 
 static void triggerBatteryDisplay() {
     batteryShowUntilMs = millis() + 3000;
 }
 
+static void updateBatteryFilter() {
+    uint32_t now = millis();
+    if (now - lastBattSampleMs < 200 && filteredBatteryPercent >= 0.0f) return;
+    lastBattSampleMs = now;
+
+    int rawLevel = M5.Power.getBatteryLevel();
+    if (rawLevel < 0) rawLevel = 0;
+    if (rawLevel > 100) rawLevel = 100;
+
+    if (filteredBatteryPercent < 0.0f) {
+        filteredBatteryPercent = (float)rawLevel;
+        displayBattLevel = rawLevel;
+    } else {
+        // 低通滤波平滑 (LPF)，有效消除 ADC 采样噪点波动
+        filteredBatteryPercent = filteredBatteryPercent * 0.88f + (float)rawLevel * 0.12f;
+        
+        // 滞后量化防抖 (死区 1.2%): 避免临界数值来回跳跃
+        int rounded = (int)(filteredBatteryPercent + 0.5f);
+        if (abs(rounded - displayBattLevel) >= 2 || (fabsf(filteredBatteryPercent - (float)displayBattLevel) > 1.2f)) {
+            displayBattLevel = rounded;
+        }
+    }
+}
+
 static void drawBatteryStatus(M5Canvas* cv) {
     if (millis() >= batteryShowUntilMs) return;
 
-    int battLevel = M5.Power.getBatteryLevel();
+    updateBatteryFilter();
+    int battLevel = displayBattLevel;
     if (battLevel < 0) battLevel = 0;
     if (battLevel > 100) battLevel = 100;
     bool isCharging = M5.Power.isCharging();
 
     int screenW = cv->width();
+    int screenH = cv->height();
     
     // 尺寸定义
     int bw = 34; // 电池主体宽
     int bh = 14; // 电池主体高
     int marginX = 5;
     int marginY = 4;
+    
+    // 获取当前屏幕坐标系下的重力方向 (cgx, cgy)
+    float ax = 0.0f, ay = 0.0f, az = 0.0f;
+    if (M5.Imu.isEnabled()) {
+        M5.Imu.getAccel(&ax, &ay, &az);
+    }
+    float cgx, cgy;
+    if (screenW > screenH) {
+        // 横屏模式 (Rotation 1)
+        cgx = -ax;
+        cgy = ay;
+    } else {
+        // 竖屏模式 (Rotation 0)
+        cgx = -ay;
+        cgy = -ax;
+    }
+
+    // 根据重力方向判断用户视觉上的“天空右上角”
     int bx = screenW - marginX - bw - 3;
     int by = marginY;
+
+    if (fabsf(cgx) > fabsf(cgy)) {
+        if (cgx < 0.0f) {
+            // 重力偏左 (设备向左立起)，天空在右，用户右上角对应屏幕右下角
+            bx = screenW - marginX - bw - 3;
+            by = screenH - marginY - bh - 2;
+        } else {
+            // 重力偏右 (设备向右立起)，天空在左，用户右上角对应屏幕左上角
+            bx = marginX + 3;
+            by = marginY;
+        }
+    } else {
+        if (cgy < 0.0f) {
+            // 重力偏上 (设备倒置)，天空在下，用户右上角对应屏幕左下角
+            bx = marginX + 3;
+            by = screenH - marginY - bh - 2;
+        } else {
+            // 重力偏下 (正常正放)，天空在上，用户右上角对应屏幕右上角
+            bx = screenW - marginX - bw - 3;
+            by = marginY;
+        }
+    }
 
     // 1. 深色半透明底衬胶囊 (确保在任何背景色/白云上都清晰可见)
     cv->fillRoundRect(bx - 3, by - 2, bw + 7, bh + 4, 4, rgb32to16(0x1B1E28));
@@ -443,6 +512,7 @@ static void drawBatteryStatus(M5Canvas* cv) {
     cv->setTextColor(TFT_WHITE);
     cv->drawString(buf, bx + bw / 2, by + bh / 2);
 }
+
 
 
 
