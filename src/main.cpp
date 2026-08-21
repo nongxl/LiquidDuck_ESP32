@@ -376,6 +376,75 @@ static int      fpsCount = 0, fpsDisplay = 0;
 
 static const std::vector<int> C_MAJOR_SCALE = {60, 62, 64, 65, 67, 69, 71};
 
+// ─────────────────────────────────────────────────────────────
+//  电量显示 HUD (按 BtnB 触发，3秒后自动消失)
+// ─────────────────────────────────────────────────────────────
+static uint32_t batteryShowUntilMs = 0;
+
+static void triggerBatteryDisplay() {
+    batteryShowUntilMs = millis() + 3000;
+}
+
+static void drawBatteryStatus(M5Canvas* cv) {
+    if (millis() >= batteryShowUntilMs) return;
+
+    int battLevel = M5.Power.getBatteryLevel();
+    if (battLevel < 0) battLevel = 0;
+    if (battLevel > 100) battLevel = 100;
+    bool isCharging = M5.Power.isCharging();
+
+    int screenW = cv->width();
+    
+    // 尺寸定义
+    int bw = 34; // 电池主体宽
+    int bh = 14; // 电池主体高
+    int marginX = 5;
+    int marginY = 4;
+    int bx = screenW - marginX - bw - 3;
+    int by = marginY;
+
+    // 1. 深色半透明底衬胶囊 (确保在任何背景色/白云上都清晰可见)
+    cv->fillRoundRect(bx - 3, by - 2, bw + 7, bh + 4, 4, rgb32to16(0x1B1E28));
+    
+    // 2. 电池外框与正极小凸起
+    cv->drawRoundRect(bx, by, bw, bh, 2, rgb32to16(0xCCCCCC));
+    cv->fillRect(bx + bw, by + 4, 2, 6, rgb32to16(0xCCCCCC));
+
+    // 3. 内部电量槽填充
+    int innerW = bw - 4;
+    int fillW = (innerW * battLevel) / 100;
+    uint16_t fillColor;
+    if (isCharging) {
+        fillColor = rgb32to16(0x00E5FF); // 充电亮青
+    } else if (battLevel > 50) {
+        fillColor = rgb32to16(0x2ED573); // 充沛绿色
+    } else if (battLevel >= 20) {
+        fillColor = rgb32to16(0xFFA502); // 警告橙黄
+    } else {
+        fillColor = rgb32to16(0xFF4757); // 低电红色
+    }
+    if (fillW > 0) {
+        cv->fillRect(bx + 2, by + 2, fillW, bh - 4, fillColor);
+    }
+
+    // 4. 内部电量数字
+    cv->setTextDatum(textdatum_t::middle_center);
+    cv->setTextSize(1);
+    char buf[12];
+    if (isCharging) {
+        snprintf(buf, sizeof(buf), "%d%%+", battLevel);
+    } else {
+        snprintf(buf, sizeof(buf), "%d%%", battLevel);
+    }
+    
+    // 投影文字提升对比度
+    cv->setTextColor(TFT_BLACK);
+    cv->drawString(buf, bx + bw / 2 + 1, by + bh / 2 + 1);
+    cv->setTextColor(TFT_WHITE);
+    cv->drawString(buf, bx + bw / 2, by + bh / 2);
+}
+
+
 
 // ─────────────────────────────────────────────────────────────
 //  音效生成逻辑
@@ -512,6 +581,7 @@ static void renderFrameBOTTLE() {
             }
         }
     }
+    drawBatteryStatus(&canvas);
     canvas.pushSprite(0, 0);
 }
 
@@ -561,7 +631,7 @@ static void renderFrameFLIP() {
     float dy = sim_to_screen_y(duck.y);
     duckSprite.pushRotateZoom(&canvas, dx, dy, duck.angle, 1.0f, 1.0f, 0x0001);
     
-    //canvas.setTextColor(TFT_DARKGREY); canvas.setCursor(SCREEN_W - 18, 2); canvas.printf("%d", fpsDisplay);
+    drawBatteryStatus(&canvas);
     canvas.pushSprite(0, 0);
 }
 
@@ -777,14 +847,20 @@ void loop() {
     lastLoopMs = nowLoop;
 
     // ─────────────────────────────────────────────────────────────
-    //  按键交互逻辑 (BtnB: 短按切主题，长按切模式)
+    //  按键交互逻辑 (BtnB: 短按切主题，长按切模式，同时显示电量)
     // ─────────────────────────────────────────────────────────────
     static bool btnBLongPressed = false;
     
+    // 只要按下 BtnB 即刻唤醒/延长电量显示 3 秒
+    if (M5.BtnB.wasPressed()) {
+        triggerBatteryDisplay();
+    }
+
     // 处理按下过程中的长按判定
     if (M5.BtnB.isPressed()) {
         if (!btnBLongPressed && M5.BtnB.pressedFor(LONG_PRESS_MS)) {
             btnBLongPressed = true;
+            triggerBatteryDisplay();
             // 长按：切换模式
             int nextMode = (int)currentMode + 1;
             if (nextMode > MODE_BOTTLE) {
@@ -824,6 +900,7 @@ void loop() {
     
     // 处理释放时的逻辑
     if (M5.BtnB.wasReleased()) {
+        triggerBatteryDisplay();
         if (!btnBLongPressed) {
             // 短按：
             if (currentMode == MODE_FLIP) {
