@@ -439,22 +439,22 @@ static void triggerBatteryDisplay() {
     if (fabsf(cgx) > fabsf(cgy)) {
         if (cgx < 0.0f) {
             lockedRotAngle = 90.0f;
-            lockedCx = screenW - 12;
-            lockedCy = screenH - 24;
+            lockedCx = screenW - 13;
+            lockedCy = screenH - 28;
         } else {
             lockedRotAngle = 270.0f;
-            lockedCx = 12;
-            lockedCy = 24;
+            lockedCx = 13;
+            lockedCy = 28;
         }
     } else {
         if (cgy < 0.0f) {
             lockedRotAngle = 180.0f;
-            lockedCx = 24;
-            lockedCy = screenH - 12;
+            lockedCx = 28;
+            lockedCy = screenH - 13;
         } else {
             lockedRotAngle = 0.0f;
-            lockedCx = screenW - 24;
-            lockedCy = 12;
+            lockedCx = screenW - 28;
+            lockedCy = 13;
         }
     }
 
@@ -466,67 +466,55 @@ static void drawBatteryStatus(M5Canvas* cv) {
 
     int battLevel = lockedDisplayBattLevel;
     if (battLevel < 0) battLevel = 0;
+    if (battLevel > 100) battLevel = 100;
     bool isCharging = lockedIsCharging;
 
-    // 绘制实底微型 Sprite (40x18)，透明色严格使用 0x0000
-    const int bw = 40;
+    // ─────────────────────────────────────────────────────────────
+    //  晶莹气泡胶囊 HUD (Glass Bubble Pill - 极客潮玩圆润风格)
+    // ─────────────────────────────────────────────────────────────
+    const int bw = 48;
     const int bh = 18;
     if (battSprite.width() != bw || battSprite.height() != bh) {
         battSprite.deleteSprite();
         battSprite.createSprite(bw, bh);
         battSprite.setPivot(bw / 2, bh / 2);
     }
-    // 关键修复：背景清为 0x0000 (纯黑作为透明底色)
-    battSprite.fillSprite(0x0000);
+    battSprite.fillSprite(0x0000); // 纯黑透明底色
 
-    // 1. 实心高质感暗色胶囊背景 (0x1C202A 转换成 RGB565)
-    uint16_t capsuleBg = rgb32to16(0x1C202A);
-    battSprite.fillRoundRect(0, 0, bw, bh, 4, capsuleBg);
+    // 1. 深色极润圆角胶囊底衬 (0x121824) + 微光圆润外框 (0x3E4E68)
+    uint16_t capsuleBg = rgb32to16(0x121824);
+    uint16_t borderCol = rgb32to16(0x3E4E68);
+    battSprite.fillRoundRect(0, 0, bw, bh, 9, capsuleBg);
+    battSprite.drawRoundRect(0, 0, bw, bh, 9, borderCol);
     
-    // 2. 电池外框与正极凸起 (清晰纯白/浅银灰)
-    int boxW = 32;
-    int boxH = 12;
-    int ox = 3;
-    int oy = 3;
-    uint16_t borderColor = rgb32to16(0xCCCCCC);
-    battSprite.drawRoundRect(ox, oy, boxW, boxH, 2, borderColor);
-    battSprite.fillRect(ox + boxW, oy + 3, 2, 6, borderColor);
-
-    // 3. 内部电量槽填充 (实色饱满填充，绝不镂空)
-    int innerW = boxW - 4;
-    int fillW = (innerW * battLevel) / 100;
-    uint16_t fillColor;
+    // 2. 左侧晶莹指示光珠 (带高光点，与小黄鸭海洋球质感呼应)
+    uint16_t orbColor;
     if (isCharging) {
-        fillColor = rgb32to16(0x00D2D3); // 充电湖青色
+        orbColor = rgb32to16(0x00F0FF); // 极客电光青
     } else if (battLevel > 50) {
-        fillColor = rgb32to16(0x10AC84); // 充沛绿色
+        orbColor = rgb32to16(0x2ED573); // 生机晶莹绿
     } else if (battLevel >= 20) {
-        fillColor = rgb32to16(0xFF9F43); // 警告橙黄
+        orbColor = rgb32to16(0xFFA502); // 暖阳琥珀橙
     } else {
-        fillColor = rgb32to16(0xEE5253); // 低电红色
+        orbColor = rgb32to16(0xFF4757); // 警示珊瑚红
     }
-    if (fillW > 0) {
-        battSprite.fillRect(ox + 2, oy + 2, fillW, boxH - 4, fillColor);
-    }
+    int dotX = 10;
+    int dotY = 9;
+    battSprite.fillCircle(dotX, dotY, 4, rgb32to16(0x080E18)); // 外层光圈
+    battSprite.fillCircle(dotX, dotY, 3, orbColor);            // 晶莹核心
+    battSprite.drawPixel(dotX - 1, dotY - 1, TFT_WHITE);       // 晶体顶高光
 
-    // 4. 内部电量文字 (使用带黑阴影的高对比实色文本，彻底消除字符镂空噪点)
-    battSprite.setTextDatum(textdatum_t::middle_center);
+    // 3. 右侧纯净高对比度文字 (无重影阴影，锐利清晰)
+    battSprite.setTextDatum(textdatum_t::middle_left);
     battSprite.setTextSize(1);
     char buf[12];
-    if (isCharging) {
-        snprintf(buf, sizeof(buf), "%d%%+", battLevel);
-    } else {
-        snprintf(buf, sizeof(buf), "%d%%", battLevel);
-    }
+    snprintf(buf, sizeof(buf), "%d%%", battLevel);
     
-    // 文本阴影 (实色黑)
-    battSprite.setTextColor(TFT_BLACK);
-    battSprite.drawString(buf, ox + boxW / 2 + 1, oy + boxH / 2 + 1);
-    // 文本本体 (实色白)
+    // 纯白高亮文字，绝无偏移重影
     battSprite.setTextColor(TFT_WHITE);
-    battSprite.drawString(buf, ox + boxW / 2, oy + boxH / 2);
+    battSprite.drawString(buf, 17, 9);
 
-    // 推送到主画布，指定透明色 0x0000
+    // 将晶莹气泡胶囊旋转推送到主画布
     battSprite.pushRotateZoom(cv, lockedCx, lockedCy, lockedRotAngle, 1.0f, 1.0f, 0x0000);
 }
 
