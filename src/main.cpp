@@ -377,20 +377,17 @@ static int      fpsCount = 0, fpsDisplay = 0;
 static const std::vector<int> C_MAJOR_SCALE = {60, 62, 64, 65, 67, 69, 71};
 
 // ─────────────────────────────────────────────────────────────
-//  电量显示 HUD (按 BtnB 触发，3秒后自动消失，重力自适应方位与低通平滑滤波)
+//  电量显示 HUD (按 BtnB 触发，3秒后自动消失，重力自适应方位与旋转，超强滤波防抖)
 // ─────────────────────────────────────────────────────────────
+static M5Canvas battSprite(&M5Cardputer.Display);
 static uint32_t batteryShowUntilMs = 0;
 static float    filteredBatteryPercent = -1.0f;
-static int      displayBattLevel = -1;
+static int      lockedDisplayBattLevel = -1; // 触发本次显示时锁定的数值
 static uint32_t lastBattSampleMs = 0;
-
-static void triggerBatteryDisplay() {
-    batteryShowUntilMs = millis() + 3000;
-}
 
 static void updateBatteryFilter() {
     uint32_t now = millis();
-    if (now - lastBattSampleMs < 200 && filteredBatteryPercent >= 0.0f) return;
+    if (now - lastBattSampleMs < 500 && filteredBatteryPercent >= 0.0f) return;
     lastBattSampleMs = now;
 
     int rawLevel = M5.Power.getBatteryLevel();
@@ -399,36 +396,38 @@ static void updateBatteryFilter() {
 
     if (filteredBatteryPercent < 0.0f) {
         filteredBatteryPercent = (float)rawLevel;
-        displayBattLevel = rawLevel;
     } else {
-        // 低通滤波平滑 (LPF)，有效消除 ADC 采样噪点波动
-        filteredBatteryPercent = filteredBatteryPercent * 0.88f + (float)rawLevel * 0.12f;
-        
-        // 滞后量化防抖 (死区 1.2%): 避免临界数值来回跳跃
-        int rounded = (int)(filteredBatteryPercent + 0.5f);
-        if (abs(rounded - displayBattLevel) >= 2 || (fabsf(filteredBatteryPercent - (float)displayBattLevel) > 1.2f)) {
-            displayBattLevel = rounded;
-        }
+        // 重度低通平滑滤波 (0.95 历史权重 + 0.05 新样本)，彻底抹平短时电压纹波与波动
+        filteredBatteryPercent = filteredBatteryPercent * 0.95f + (float)rawLevel * 0.05f;
     }
+}
+
+static void triggerBatteryDisplay() {
+    updateBatteryFilter();
+    // 关键优化：在按下按键触发瞬间锁定本次要展示的电量值，3秒内绝对稳定不跳动
+    if (filteredBatteryPercent < 0.0f) {
+        int raw = M5.Power.getBatteryLevel();
+        if (raw < 0) raw = 0; if (raw > 100) raw = 100;
+        filteredBatteryPercent = (float)raw;
+    }
+    lockedDisplayBattLevel = (int)(filteredBatteryPercent + 0.5f);
+    if (lockedDisplayBattLevel < 0) lockedDisplayBattLevel = 0;
+    if (lockedDisplayBattLevel > 100) lockedDisplayBattLevel = 100;
+
+    batteryShowUntilMs = millis() + 3000;
 }
 
 static void drawBatteryStatus(M5Canvas* cv) {
     if (millis() >= batteryShowUntilMs) return;
 
-    updateBatteryFilter();
-    int battLevel = displayBattLevel;
+    int battLevel = lockedDisplayBattLevel;
+    if (battLevel < 0) battLevel = (int)(filteredBatteryPercent + 0.5f);
     if (battLevel < 0) battLevel = 0;
     if (battLevel > 100) battLevel = 100;
     bool isCharging = M5.Power.isCharging();
 
     int screenW = cv->width();
     int screenH = cv->height();
-    
-    // 尺寸定义
-    int bw = 34; // 电池主体宽
-    int bh = 14; // 电池主体高
-    int marginX = 5;
-    int marginY = 4;
     
     // 获取当前屏幕坐标系下的重力方向 (cgx, cgy)
     float ax = 0.0f, ay = 0.0f, az = 0.0f;
@@ -446,41 +445,60 @@ static void drawBatteryStatus(M5Canvas* cv) {
         cgy = -ax;
     }
 
-    // 根据重力方向判断用户视觉上的“天空右上角”
-    int bx = screenW - marginX - bw - 3;
-    int by = marginY;
+    // 判断朝向角度与用户视觉上的“右上角”中心点
+    float rotAngle = 0.0f;
+    int cx = screenW - 24;
+    int cy = 12;
 
     if (fabsf(cgx) > fabsf(cgy)) {
         if (cgx < 0.0f) {
-            // 重力偏左 (设备向左立起)，天空在右，用户右上角对应屏幕右下角
-            bx = screenW - marginX - bw - 3;
-            by = screenH - marginY - bh - 2;
+            // 重力偏左 (设备向左立起)，天空在右，用户视角正立需要顺时针旋转 90 度
+            rotAngle = 90.0f;
+            cx = screenW - 12;
+            cy = screenH - 24;
         } else {
-            // 重力偏右 (设备向右立起)，天空在左，用户右上角对应屏幕左上角
-            bx = marginX + 3;
-            by = marginY;
+            // 重力偏右 (设备向右立起)，天空在左，用户视角正立需要逆时针旋转 90 度 (-90 或 270)
+            rotAngle = 270.0f;
+            cx = 12;
+            cy = 24;
         }
     } else {
         if (cgy < 0.0f) {
-            // 重力偏上 (设备倒置)，天空在下，用户右上角对应屏幕左下角
-            bx = marginX + 3;
-            by = screenH - marginY - bh - 2;
+            // 重力偏上 (设备倒置)，天空在下，用户视角正立需要旋转 180 度
+            rotAngle = 180.0f;
+            cx = 24;
+            cy = screenH - 12;
         } else {
-            // 重力偏下 (正常正放)，天空在上，用户右上角对应屏幕右上角
-            bx = screenW - marginX - bw - 3;
-            by = marginY;
+            // 重力偏下 (正常正放)，天空在上，0度
+            rotAngle = 0.0f;
+            cx = screenW - 24;
+            cy = 12;
         }
     }
 
-    // 1. 深色半透明底衬胶囊 (确保在任何背景色/白云上都清晰可见)
-    cv->fillRoundRect(bx - 3, by - 2, bw + 7, bh + 4, 4, rgb32to16(0x1B1E28));
+    // 绘制电池微型 Sprite (40x18)
+    const int bw = 40;
+    const int bh = 18;
+    if (battSprite.width() != bw || battSprite.height() != bh) {
+        battSprite.deleteSprite();
+        battSprite.createSprite(bw, bh);
+        battSprite.setPivot(bw / 2, bh / 2);
+    }
+    battSprite.fillSprite(0x0001); // 0x0001 为透明色
+
+    // 1. 深色半透明底衬圆角胶囊
+    battSprite.fillRoundRect(0, 0, bw, bh, 4, rgb32to16(0x1B1E28));
     
-    // 2. 电池外框与正极小凸起
-    cv->drawRoundRect(bx, by, bw, bh, 2, rgb32to16(0xCCCCCC));
-    cv->fillRect(bx + bw, by + 4, 2, 6, rgb32to16(0xCCCCCC));
+    // 2. 电池外框与正极凸起
+    int boxW = 32;
+    int boxH = 12;
+    int ox = 3;
+    int oy = 3;
+    battSprite.drawRoundRect(ox, oy, boxW, boxH, 2, rgb32to16(0xCCCCCC));
+    battSprite.fillRect(ox + boxW, oy + 3, 2, 6, rgb32to16(0xCCCCCC));
 
     // 3. 内部电量槽填充
-    int innerW = bw - 4;
+    int innerW = boxW - 4;
     int fillW = (innerW * battLevel) / 100;
     uint16_t fillColor;
     if (isCharging) {
@@ -493,12 +511,12 @@ static void drawBatteryStatus(M5Canvas* cv) {
         fillColor = rgb32to16(0xFF4757); // 低电红色
     }
     if (fillW > 0) {
-        cv->fillRect(bx + 2, by + 2, fillW, bh - 4, fillColor);
+        battSprite.fillRect(ox + 2, oy + 2, fillW, boxH - 4, fillColor);
     }
 
-    // 4. 内部电量数字
-    cv->setTextDatum(textdatum_t::middle_center);
-    cv->setTextSize(1);
+    // 4. 内部电量文字 (在 Sprite 内部永远正立绘制)
+    battSprite.setTextDatum(textdatum_t::middle_center);
+    battSprite.setTextSize(1);
     char buf[12];
     if (isCharging) {
         snprintf(buf, sizeof(buf), "%d%%+", battLevel);
@@ -506,15 +524,14 @@ static void drawBatteryStatus(M5Canvas* cv) {
         snprintf(buf, sizeof(buf), "%d%%", battLevel);
     }
     
-    // 投影文字提升对比度
-    cv->setTextColor(TFT_BLACK);
-    cv->drawString(buf, bx + bw / 2 + 1, by + bh / 2 + 1);
-    cv->setTextColor(TFT_WHITE);
-    cv->drawString(buf, bx + bw / 2, by + bh / 2);
+    battSprite.setTextColor(TFT_BLACK);
+    battSprite.drawString(buf, ox + boxW / 2 + 1, oy + boxH / 2 + 1);
+    battSprite.setTextColor(TFT_WHITE);
+    battSprite.drawString(buf, ox + boxW / 2, oy + boxH / 2);
+
+    // 将电池 Sprite 旋转并推送到主 Canvas (以 0x0001 为透明色)
+    battSprite.pushRotateZoom(cv, cx, cy, rotAngle, 1.0f, 1.0f, 0x0001);
 }
-
-
-
 
 // ─────────────────────────────────────────────────────────────
 //  音效生成逻辑
@@ -888,12 +905,15 @@ void setup() {
     updateBallSprites(currentBallThemeIndex);
     currentBgColor = BALL_THEMES[currentBallThemeIndex].defaultBg;
     initVibrator();
+    updateBatteryFilter();
     fpsLastMs = millis();
 }
 
 void loop() {
     M5.update(); // 统一使用 M5Unified 的更新逻辑
+    updateBatteryFilter(); // 持续平稳后台滤波
     static bool lastKbdPressed = false;
+
     
     // 兼容判定：Cardputer 键盘按下 OR 任何设备的 BtnA (StickS3 正面按键) 按下
     bool currentKbdPressed = M5Cardputer.Keyboard.isPressed();
