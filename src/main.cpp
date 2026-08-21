@@ -383,6 +383,9 @@ static M5Canvas battSprite(&M5Cardputer.Display);
 static uint32_t batteryShowUntilMs = 0;
 static float    filteredBatteryPercent = -1.0f;
 static int      lockedDisplayBattLevel = -1; // 触发本次显示时锁定的数值
+static bool     lockedIsCharging = false;    // 触发本次显示时锁定的充电状态 (彻底防闪烁)
+static float    lockedRotAngle = 0.0f;       // 触发本次显示时锁定的旋转角度
+static int      lockedCx = 0, lockedCy = 0;  // 触发本次显示时锁定的中心位置
 static uint32_t lastBattSampleMs = 0;
 
 static void updateBatteryFilter() {
@@ -404,7 +407,8 @@ static void updateBatteryFilter() {
 
 static void triggerBatteryDisplay() {
     updateBatteryFilter();
-    // 关键优化：在按下按键触发瞬间锁定本次要展示的电量值，3秒内绝对稳定不跳动
+    
+    // 1. 锁定电量数值
     if (filteredBatteryPercent < 0.0f) {
         int raw = M5.Power.getBatteryLevel();
         if (raw < 0) raw = 0; if (raw > 100) raw = 100;
@@ -414,6 +418,46 @@ static void triggerBatteryDisplay() {
     if (lockedDisplayBattLevel < 0) lockedDisplayBattLevel = 0;
     if (lockedDisplayBattLevel > 100) lockedDisplayBattLevel = 100;
 
+    // 2. 锁定充电状态 (解决充电检测高频跳变导致字符+号抖动闪烁的问题)
+    lockedIsCharging = M5.Power.isCharging();
+
+    // 3. 锁定方位与旋转角度
+    int screenW = (currentMode == MODE_FLIP) ? 240 : 135;
+    int screenH = (currentMode == MODE_FLIP) ? 135 : 240;
+    
+    float ax = 0.0f, ay = 0.0f, az = 0.0f;
+    if (M5.Imu.isEnabled()) {
+        M5.Imu.getAccel(&ax, &ay, &az);
+    }
+    float cgx, cgy;
+    if (screenW > screenH) {
+        cgx = -ax; cgy = ay;
+    } else {
+        cgx = -ay; cgy = -ax;
+    }
+
+    if (fabsf(cgx) > fabsf(cgy)) {
+        if (cgx < 0.0f) {
+            lockedRotAngle = 90.0f;
+            lockedCx = screenW - 12;
+            lockedCy = screenH - 24;
+        } else {
+            lockedRotAngle = 270.0f;
+            lockedCx = 12;
+            lockedCy = 24;
+        }
+    } else {
+        if (cgy < 0.0f) {
+            lockedRotAngle = 180.0f;
+            lockedCx = 24;
+            lockedCy = screenH - 12;
+        } else {
+            lockedRotAngle = 0.0f;
+            lockedCx = screenW - 24;
+            lockedCy = 12;
+        }
+    }
+
     batteryShowUntilMs = millis() + 3000;
 }
 
@@ -421,62 +465,10 @@ static void drawBatteryStatus(M5Canvas* cv) {
     if (millis() >= batteryShowUntilMs) return;
 
     int battLevel = lockedDisplayBattLevel;
-    if (battLevel < 0) battLevel = (int)(filteredBatteryPercent + 0.5f);
     if (battLevel < 0) battLevel = 0;
-    if (battLevel > 100) battLevel = 100;
-    bool isCharging = M5.Power.isCharging();
+    bool isCharging = lockedIsCharging;
 
-    int screenW = cv->width();
-    int screenH = cv->height();
-    
-    // 获取当前屏幕坐标系下的重力方向 (cgx, cgy)
-    float ax = 0.0f, ay = 0.0f, az = 0.0f;
-    if (M5.Imu.isEnabled()) {
-        M5.Imu.getAccel(&ax, &ay, &az);
-    }
-    float cgx, cgy;
-    if (screenW > screenH) {
-        // 横屏模式 (Rotation 1)
-        cgx = -ax;
-        cgy = ay;
-    } else {
-        // 竖屏模式 (Rotation 0)
-        cgx = -ay;
-        cgy = -ax;
-    }
-
-    // 判断朝向角度与用户视觉上的“右上角”中心点
-    float rotAngle = 0.0f;
-    int cx = screenW - 24;
-    int cy = 12;
-
-    if (fabsf(cgx) > fabsf(cgy)) {
-        if (cgx < 0.0f) {
-            // 重力偏左 (设备向左立起)，天空在右，用户视角正立需要顺时针旋转 90 度
-            rotAngle = 90.0f;
-            cx = screenW - 12;
-            cy = screenH - 24;
-        } else {
-            // 重力偏右 (设备向右立起)，天空在左，用户视角正立需要逆时针旋转 90 度 (-90 或 270)
-            rotAngle = 270.0f;
-            cx = 12;
-            cy = 24;
-        }
-    } else {
-        if (cgy < 0.0f) {
-            // 重力偏上 (设备倒置)，天空在下，用户视角正立需要旋转 180 度
-            rotAngle = 180.0f;
-            cx = 24;
-            cy = screenH - 12;
-        } else {
-            // 重力偏下 (正常正放)，天空在上，0度
-            rotAngle = 0.0f;
-            cx = screenW - 24;
-            cy = 12;
-        }
-    }
-
-    // 绘制电池微型 Sprite (40x18)
+    // 绘制实底微型 Sprite (40x18)，透明色严格使用 0x0000
     const int bw = 40;
     const int bh = 18;
     if (battSprite.width() != bw || battSprite.height() != bh) {
@@ -484,37 +476,40 @@ static void drawBatteryStatus(M5Canvas* cv) {
         battSprite.createSprite(bw, bh);
         battSprite.setPivot(bw / 2, bh / 2);
     }
-    battSprite.fillSprite(0x0001); // 0x0001 为透明色
+    // 关键修复：背景清为 0x0000 (纯黑作为透明底色)
+    battSprite.fillSprite(0x0000);
 
-    // 1. 深色半透明底衬圆角胶囊
-    battSprite.fillRoundRect(0, 0, bw, bh, 4, rgb32to16(0x1B1E28));
+    // 1. 实心高质感暗色胶囊背景 (0x1C202A 转换成 RGB565)
+    uint16_t capsuleBg = rgb32to16(0x1C202A);
+    battSprite.fillRoundRect(0, 0, bw, bh, 4, capsuleBg);
     
-    // 2. 电池外框与正极凸起
+    // 2. 电池外框与正极凸起 (清晰纯白/浅银灰)
     int boxW = 32;
     int boxH = 12;
     int ox = 3;
     int oy = 3;
-    battSprite.drawRoundRect(ox, oy, boxW, boxH, 2, rgb32to16(0xCCCCCC));
-    battSprite.fillRect(ox + boxW, oy + 3, 2, 6, rgb32to16(0xCCCCCC));
+    uint16_t borderColor = rgb32to16(0xCCCCCC);
+    battSprite.drawRoundRect(ox, oy, boxW, boxH, 2, borderColor);
+    battSprite.fillRect(ox + boxW, oy + 3, 2, 6, borderColor);
 
-    // 3. 内部电量槽填充
+    // 3. 内部电量槽填充 (实色饱满填充，绝不镂空)
     int innerW = boxW - 4;
     int fillW = (innerW * battLevel) / 100;
     uint16_t fillColor;
     if (isCharging) {
-        fillColor = rgb32to16(0x00E5FF); // 充电亮青
+        fillColor = rgb32to16(0x00D2D3); // 充电湖青色
     } else if (battLevel > 50) {
-        fillColor = rgb32to16(0x2ED573); // 充沛绿色
+        fillColor = rgb32to16(0x10AC84); // 充沛绿色
     } else if (battLevel >= 20) {
-        fillColor = rgb32to16(0xFFA502); // 警告橙黄
+        fillColor = rgb32to16(0xFF9F43); // 警告橙黄
     } else {
-        fillColor = rgb32to16(0xFF4757); // 低电红色
+        fillColor = rgb32to16(0xEE5253); // 低电红色
     }
     if (fillW > 0) {
         battSprite.fillRect(ox + 2, oy + 2, fillW, boxH - 4, fillColor);
     }
 
-    // 4. 内部电量文字 (在 Sprite 内部永远正立绘制)
+    // 4. 内部电量文字 (使用带黑阴影的高对比实色文本，彻底消除字符镂空噪点)
     battSprite.setTextDatum(textdatum_t::middle_center);
     battSprite.setTextSize(1);
     char buf[12];
@@ -524,14 +519,17 @@ static void drawBatteryStatus(M5Canvas* cv) {
         snprintf(buf, sizeof(buf), "%d%%", battLevel);
     }
     
+    // 文本阴影 (实色黑)
     battSprite.setTextColor(TFT_BLACK);
     battSprite.drawString(buf, ox + boxW / 2 + 1, oy + boxH / 2 + 1);
+    // 文本本体 (实色白)
     battSprite.setTextColor(TFT_WHITE);
     battSprite.drawString(buf, ox + boxW / 2, oy + boxH / 2);
 
-    // 将电池 Sprite 旋转并推送到主 Canvas (以 0x0001 为透明色)
-    battSprite.pushRotateZoom(cv, cx, cy, rotAngle, 1.0f, 1.0f, 0x0001);
+    // 推送到主画布，指定透明色 0x0000
+    battSprite.pushRotateZoom(cv, lockedCx, lockedCy, lockedRotAngle, 1.0f, 1.0f, 0x0000);
 }
+
 
 // ─────────────────────────────────────────────────────────────
 //  音效生成逻辑
