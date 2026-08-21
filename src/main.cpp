@@ -14,10 +14,18 @@
 // ─────────────────────────────────────────────────────────────
 //  物理模式与数据结构
 // ─────────────────────────────────────────────────────────────
-enum PhysicsMode { MODE_FLIP, MODE_BOTTLE };
+enum PhysicsMode { 
+    MODE_FLIP, 
+    MODE_SOLID_PIXEL, 
+    MODE_GRADIENT_PIXEL, 
+    MODE_BOTTLE 
+};
 static PhysicsMode currentMode = MODE_FLIP;
 static int currentCharacterIndex = 0; // 当前角色索引
 static uint32_t currentBgColor = COLOR_BG_BLUE; // 当前背景色
+
+static int currentFluidW = FLUID_WIDTH_BOTTLE;
+static int currentFluidH = FLUID_HEIGHT_BOTTLE;
 
 
 // ─────────────────────────────────────────────────────────────
@@ -95,27 +103,37 @@ void updateClouds(float dt) {
         }
     }
 
-    // 云朵间的碰撞处理（防止重叠）
+    // 云朵间的碰撞处理（1.0f 真实几何边界接触，轻微相撞后产生物理反弹并顺滑飘散荡开）
     float dx = clouds[1].x - clouds[0].x;
     float dy = clouds[1].y - clouds[0].y;
     float d2 = dx*dx + dy*dy;
-    float minDist = (clouds[0].size + clouds[1].size) * 1.2f; 
+    float minDist = clouds[0].size + clouds[1].size; // 还原为 1.0f 真实几何边缘接触
     if (d2 < minDist * minDist) {
         float d = sqrtf(d2); if (d < 0.1f) d = 0.1f;
-        float overlap = (minDist - d) * 0.5f;
+        float overlap = (minDist - d);
         float nx = dx / d, ny = dy / d;
-        clouds[0].x -= nx * overlap; clouds[0].y -= ny * overlap;
-        clouds[1].x += nx * overlap; clouds[1].y += ny * overlap;
         
-        // 简单的弹性碰撞：交换部分动量
+        // 1. 物理位置轻微修正以防止穿透（仅做 20% 的硬性推开，保留 80% 作为弹性重合水乳交融的美感）
+        clouds[0].x -= nx * overlap * 0.10f; clouds[0].y -= ny * overlap * 0.10f;
+        clouds[1].x += nx * overlap * 0.10f; clouds[1].y += ny * overlap * 0.10f;
+        
+        // 2. 完美的法线动能反弹与轻微逃逸力
         float rvx = clouds[1].vx - clouds[0].vx;
         float rvy = clouds[1].vy - clouds[0].vy;
         float velNormal = rvx * nx + rvy * ny;
-        if (velNormal < 0) {
-            float bounce = velNormal * 0.5f;
-            clouds[0].vx += nx * bounce; clouds[0].vy += ny * bounce;
-            clouds[1].vx -= nx * bounce; clouds[1].vy -= ny * bounce;
+        
+        // 当两朵云正在相互靠近时，进行法线动量反转反弹
+        if (velNormal < 0.0f) {
+            float restitution = 0.85f; // 高弹性，相撞时快速弹开
+            float impulse = -(1.0f + restitution) * velNormal * 0.5f;
+            clouds[0].vx -= nx * impulse; clouds[0].vy -= ny * impulse;
+            clouds[1].vx += nx * impulse; clouds[1].vy += ny * impulse;
         }
+        
+        // 3. 额外注入“微观飘散排斥速度”，即使相对速度为零，也会在碰触瞬间优雅地朝两侧轻轻飘逸荡开
+        float floatAwayPush = 12.0f + overlap * 8.0f; // 飘逸推力
+        clouds[0].vx -= nx * floatAwayPush; clouds[0].vy -= ny * floatAwayPush;
+        clouds[1].vx += nx * floatAwayPush; clouds[1].vy += ny * floatAwayPush;
     }
 }
 
@@ -159,13 +177,93 @@ static inline float screen_to_sim_y(float sc_y) { return (sc_y / flip_scale_y) +
 static FlipFluid* bottleFluid = nullptr;
 static float* bottleGrid = nullptr;
 
+static const int PIXEL_PALETTE_COUNT = 8;
+static const uint32_t PIXEL_PALETTES[PIXEL_PALETTE_COUNT][7] = {
+    { 0x000500, 0x002200, 0x004400, 0x008800, 0x00CC00, 0x00FF00, 0x88FF88 }, // 黑客帝国绿 (Matrix Hacker)
+    { 0x050005, 0x220033, 0x550066, 0x990099, 0xFF00FF, 0x00FFFF, 0xFFFFFF }, // 霓虹赛博 (Cyberpunk)
+    { 0x0C0500, 0x331100, 0x662200, 0x994400, 0xCC6600, 0xFF8800, 0xFFBB66 }, // 经典琥珀 (Amber Terminal)
+    { 0x080808, 0x222222, 0x444444, 0x777777, 0xAAAAAA, 0xDDDDDD, 0xFFFFFF }, // 复古黑白 (Classic Mono)
+    { 0x0A0000, 0x330000, 0x660000, 0x990000, 0xCC0000, 0xFF0000, 0xFF8888 }, // 猩红警戒 (Blood Red)
+    { 0x000511, 0x001133, 0x002266, 0x0044AA, 0x0088FF, 0x00CCFF, 0xAAFFFF }, // 深海蔚蓝 (Deep Sea)
+    { 0x08000C, 0x1E002E, 0x3C005C, 0x5A008A, 0x7800B8, 0x39FF14, 0xE5FF00 }, // 生化毒液 (Toxic Venom)
+    { 0x0D0B00, 0x332900, 0x5C4A00, 0x856B00, 0xAD8C00, 0xD6AD00, 0xFFF5CC }  // 奢华至臻 (Luxury Gold)
+};
+static int currentPixelPaletteIndex = 5; // 默认深海蔚蓝 (Deep Sea)
+
 static uint32_t getFluidColor(float density) {
-    if (density < 0.1f) return OCEAN_PALETTE[0];
+    if (density < 0.1f) return PIXEL_PALETTES[currentPixelPaletteIndex][0];
     float factor = density / 20.0f;
-    int idx = (int)(factor * (OCEAN_PALETTE_SIZE - 1));
+    int idx = (int)(factor * (7 - 1));
     if (idx < 1) idx = 1;
-    if (idx >= OCEAN_PALETTE_SIZE) idx = OCEAN_PALETTE_SIZE - 1;
-    return OCEAN_PALETTE[idx];
+    if (idx >= 7) idx = 7 - 1;
+    return PIXEL_PALETTES[currentPixelPaletteIndex][idx];
+}
+
+static uint32_t getPixelSolidColor(float density) {
+    if (density < 0.1f) return PIXEL_PALETTES[currentPixelPaletteIndex][0];
+    return PIXEL_PALETTES[currentPixelPaletteIndex][7 - 2]; // 亮色，p[5]
+}
+
+static uint32_t getPixelGradientColor(float density) {
+    if (density < 0.5f) return PIXEL_PALETTES[currentPixelPaletteIndex][0];
+    float factor = density / 4.0f; // 在 1 到 4 颗粒子汇集时获得完整色阶明暗映射
+    int idx = (int)(factor * (7 - 1));
+    if (idx < 1) idx = 1;
+    if (idx >= 7) idx = 7 - 1;
+    return PIXEL_PALETTES[currentPixelPaletteIndex][idx];
+}
+
+static void initFluidForMode(PhysicsMode mode) {
+    if (bottleFluid) {
+        flip_destroy(bottleFluid);
+        bottleFluid = nullptr;
+    }
+    if (bottleGrid) {
+        free(bottleGrid);
+        bottleGrid = nullptr;
+    }
+
+    int gridW = 0;
+    int gridH = 0;
+    float fillRatio = FLUID_FILL_RATIO_BOTTLE; // 0.45f
+    float gravity = 0.0f;
+    int pushIters = 1;
+    int pressIters = 12;
+    float flipRatio = 0.9f;
+
+    if (mode == MODE_BOTTLE) {
+        gridW = FLUID_WIDTH_BOTTLE; // 27
+        gridH = FLUID_HEIGHT_BOTTLE; // 48
+        gravity = FLUID_GRAVITY_BOTTLE; // 16.0f
+        pushIters = 1;
+        pressIters = 12;
+        flipRatio = FLIP_RATIO_BOTTLE;
+    } else if (mode == MODE_SOLID_PIXEL || mode == MODE_GRADIENT_PIXEL) {
+        gridW = 14;
+        gridH = 24;
+        fillRatio = FLUID_FILL_RATIO_PIXEL;
+        gravity = 24.0f;
+        pushIters = 1;
+        pressIters = 16;
+        flipRatio = FLIP_RATIO_PIXEL;
+    } else {
+        return;
+    }
+
+    currentFluidW = gridW;
+    currentFluidH = gridH;
+
+    float simW = 1.0f;
+    float simH = simW * ((float)gridH / (float)gridW);
+    bottleFluid = flip_create(simW, simH, gridW, gridH, fillRatio);
+    if (bottleFluid) {
+        flip_set_gravity_scale(bottleFluid, gravity);
+        flip_set_solver_quality(bottleFluid, pushIters, pressIters, flipRatio);
+    }
+    bottleGrid = (float*)malloc(sizeof(float) * gridW * gridH);
+    if (bottleGrid) {
+        memset(bottleGrid, 0, sizeof(float) * gridW * gridH);
+    }
 }
 
 static std::vector<uint8_t> particleColors;
@@ -175,7 +273,7 @@ static float    frameEnergy = 0.0f;  // 当前帧累积的碰撞能量
 static float    vibrLevel   = 0.0f;  // 经低通滤波后的平滑震动强度输出
 
 static M5Canvas canvas(&M5Cardputer.Display);
-static M5Canvas duckSprite(&canvas);
+static M5Canvas duckSprite(&M5Cardputer.Display);
 static M5Canvas ballSprites[2][8];
 
 // 更新角色精灵图
@@ -192,24 +290,84 @@ void updateCharacterSprite() {
     }
 }
 
-// 随机切换主题（背景色与角色同时随机变换）
+// ─────────────────────────────────────────────────────────────
+//  辅助渲染工具
+// ─────────────────────────────────────────────────────────────
+static uint16_t getBrightened16(uint32_t c, float f) {
+    uint8_t r = (uint8_t)min(255.0f, ((c >> 16) & 0xFF) * f);
+    uint8_t g = (uint8_t)min(255.0f, ((c >> 8) & 0xFF) * f);
+    uint8_t b = (uint8_t)min(255.0f, (c & 0xFF) * f);
+    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+static int currentBallThemeIndex = 0; // 当前海洋球小球主题 (默认 0: FluidBox Water)
+
+// 刷新小球精灵图的颜色与高光
+void updateBallSprites(int themeIndex) {
+    if (themeIndex < 0 || themeIndex >= BALL_THEME_COUNT) themeIndex = 0;
+    const BallTheme& theme = BALL_THEMES[themeIndex];
+    float pRadius = fluid ? flip_get_particle_radius(fluid) : 3.5f;
+    int dia = (int)(pRadius * 2.4f);
+    if (dia < 2) dia = 2;
+
+    for (int i = 0; i < 8; i++) {
+        uint32_t c = theme.palette[i];
+        for (int b = 0; b < 2; b++) {
+            if (ballSprites[b][i].width() == 0) {
+                ballSprites[b][i].createSprite(dia, dia);
+            }
+            ballSprites[b][i].fillSprite(0x0001);
+            if (b == 1 && theme.speedHighlightWhite) {
+                // 超速纯白水花模式 (类似 FluidBox 浪花飞溅)
+                ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2, rgb32to16(0x96CDFA));
+                ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2 - 1, rgb32to16(0xD8EDFD));
+                ballSprites[b][i].fillCircle(dia/2 - 1, dia/2 - 1, 2, TFT_WHITE);
+            } else {
+                float f = (b == 0) ? 1.0f : 1.6f; 
+                ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2, getBrightened16(c, f * 0.7f));
+                ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2 - 1, getBrightened16(c, f * 1.15f));
+                ballSprites[b][i].fillCircle(dia/2 - 1, dia/2 - 1, (b == 0 ? 1 : 2), TFT_WHITE);
+            }
+        }
+    }
+}
+
+// 随机切换主题（小球配色、背景色与角色同时随机变换）
 void switchTheme() {
-    // 1. 随机背景色 (确保变化)
-    static const uint32_t bgColors[] = {COLOR_BG_BLUE, COLOR_BG_ORANGE, COLOR_BG_GREEN, COLOR_BG_DARKBLUE};
+    // 1. 随机小球主题
+    int oldTheme = currentBallThemeIndex;
+    if (BALL_THEME_COUNT > 1) {
+        while (currentBallThemeIndex == oldTheme) {
+            currentBallThemeIndex = random(BALL_THEME_COUNT);
+        }
+    }
+    updateBallSprites(currentBallThemeIndex);
+
+    // 2. 随机背景色 (精选明亮清爽的高颜值背景色)
+    static const uint32_t bgColors[] = {
+        COLOR_BG_BLUE, COLOR_BG_ORANGE, COLOR_BG_GREEN, 
+        COLOR_BG_CYAN, COLOR_BG_PINK,   COLOR_BG_MINT
+    };
     uint32_t oldColor = currentBgColor;
-    while (currentBgColor == oldColor) {
-        currentBgColor = bgColors[random(4)];
+    if (random(2) == 0 && BALL_THEMES[currentBallThemeIndex].defaultBg != 0) {
+        currentBgColor = BALL_THEMES[currentBallThemeIndex].defaultBg;
+    } else {
+        while (currentBgColor == oldColor) {
+            currentBgColor = bgColors[random(sizeof(bgColors) / sizeof(bgColors[0]))];
+        }
     }
     
-    // 2. 随机角色 (确保变化)
-    int oldIndex = currentCharacterIndex;
-    while (currentCharacterIndex == oldIndex) {
-        currentCharacterIndex = random(CHARACTER_COUNT);
+    // 3. 随机角色 (确保变化)
+    int oldCharIndex = currentCharacterIndex;
+    if (CHARACTER_COUNT > 1) {
+        while (currentCharacterIndex == oldCharIndex) {
+            currentCharacterIndex = random(CHARACTER_COUNT);
+        }
     }
     updateCharacterSprite();
     
-    Serial.printf("Theme Switched: Color=0x%06X, Character=%s\n", 
-                  currentBgColor, CHARACTER_REGISTRY[currentCharacterIndex].name);
+    Serial.printf("Theme Switched: BallTheme=%s, Color=0x%06X, Character=%s\n", 
+                  BALL_THEMES[currentBallThemeIndex].name, currentBgColor, CHARACTER_REGISTRY[currentCharacterIndex].name);
 }
 
 static uint32_t fpsLastMs = 0;
@@ -217,16 +375,6 @@ static int      fpsCount = 0, fpsDisplay = 0;
 
 static const std::vector<int> C_MAJOR_SCALE = {60, 62, 64, 65, 67, 69, 71};
 
-// ─────────────────────────────────────────────────────────────
-//  辅助渲染工具
-// ─────────────────────────────────────────────────────────────
-
-static uint16_t getBrightened16(uint32_t c, float f) {
-    uint8_t r = (uint8_t)min(255.0f, ((c >> 16) & 0xFF) * f);
-    uint8_t g = (uint8_t)min(255.0f, ((c >> 8) & 0xFF) * f);
-    uint8_t b = (uint8_t)min(255.0f, (c & 0xFF) * f);
-    return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-}
 
 // ─────────────────────────────────────────────────────────────
 //  音效生成逻辑
@@ -292,7 +440,7 @@ static void physicsStepBOTTLE(float dt) {
     float sub_dt = dt * 0.5f;
     flip_step(bottleFluid, sub_dt, gx, gy);
     flip_step(bottleFluid, sub_dt, gx, gy);
-    flip_get_led_grid(bottleFluid, bottleGrid, FLUID_WIDTH_BOTTLE, FLUID_HEIGHT_BOTTLE);
+    flip_get_led_grid(bottleFluid, bottleGrid, currentFluidW, currentFluidH);
     
     float accelMag = sqrtf(ax*ax + ay*ay + az*az);
     float currentShake = fabsf(accelMag - 1.0f);
@@ -302,15 +450,64 @@ static void physicsStepBOTTLE(float dt) {
 }
 
 static void renderFrameBOTTLE() {
-    canvas.fillSprite(rgb32to16(0x00060E)); // 恢复海水模式的深色背景
-    float cellW = 135.0f / FLUID_WIDTH_BOTTLE;
-    float cellH = 240.0f / FLUID_HEIGHT_BOTTLE;
-    for (int x = 0; x < FLUID_WIDTH_BOTTLE; x++) {
-        for (int y = 0; y < FLUID_HEIGHT_BOTTLE; y++) {
-            float density = bottleGrid[x * FLUID_HEIGHT_BOTTLE + y];
-            if (density > 0.1f) {
-                uint32_t color = getFluidColor(density);
-                canvas.fillRect(lrintf(x * cellW), lrintf(y * cellH), (int)ceilf(cellW), (int)ceilf(cellH), rgb32to16(color));
+    uint32_t bg32 = (currentMode == MODE_BOTTLE) ? OCEAN_PALETTE[0] : PIXEL_PALETTES[currentPixelPaletteIndex][0];
+    canvas.fillSprite(rgb32to16(bg32));
+    float cellW = 135.0f / currentFluidW;
+    float cellH = 240.0f / currentFluidH;
+
+    if (currentMode == MODE_SOLID_PIXEL || currentMode == MODE_GRADIENT_PIXEL) {
+        // ================= 赛博像素流体模式 (无分摊、孤立粒子点电荷累加引擎) =================
+        // 专门开辟一块临时点密度网格，将每个粒子当成完美的“单格点”，彻底打破双线性插值带来的 4 格马赛克效应！
+        float* tempGrid = (float*)malloc(sizeof(float) * currentFluidW * currentFluidH);
+        if (tempGrid) {
+            memset(tempGrid, 0, sizeof(float) * currentFluidW * currentFluidH);
+            
+            int num = 0; float *pos = nullptr; float *vel = nullptr;
+            flip_get_particles(bottleFluid, &num, &pos, &vel);
+            
+            if (num > 0 && pos) {
+                for (int i = 0; i < num; i++) {
+                    int gx = (int)(pos[2*i+0] * currentFluidW);
+                    int gy = (int)(pos[2*i+1] * currentFluidW);
+                    if (gx < 0) gx = 0; if (gx >= currentFluidW) gx = currentFluidW - 1;
+                    if (gy < 0) gy = 0; if (gy >= currentFluidH) gy = currentFluidH - 1;
+                    
+                    tempGrid[gx * currentFluidH + gy] += 1.0f; // 100% 力量加给它当前所在的唯一单格子
+                }
+            }
+            
+            for (int x = 0; x < currentFluidW; x++) {
+                for (int y = 0; y < currentFluidH; y++) {
+                    float density = tempGrid[x * currentFluidH + y];
+                    if (density > 0.0f) {
+                        uint32_t color32;
+                        if (currentMode == MODE_SOLID_PIXEL) {
+                            color32 = getPixelSolidColor(density);
+                        } else {
+                            color32 = getPixelGradientColor(density);
+                        }
+                        uint16_t color16 = rgb32to16(color32);
+                        
+                        float rx = x * cellW + 1.0f;
+                        float ry = y * cellH + 1.0f;
+                        float rw = cellW - 2.0f;
+                        float rh = cellH - 2.0f;
+                        canvas.fillRoundRect(lrintf(rx), lrintf(ry), (int)ceilf(rw), (int)ceilf(rh), 2, color16);
+                    }
+                }
+            }
+            free(tempGrid);
+        }
+    } else {
+        // ================= 原生柔连海洋瓶模式 (采用双线性插值平滑渐变波浪) =================
+        for (int x = 0; x < currentFluidW; x++) {
+            for (int y = 0; y < currentFluidH; y++) {
+                float density = bottleGrid[x * currentFluidH + y];
+                if (density > 0.1f) {
+                    uint32_t color32 = getFluidColor(density);
+                    uint16_t color16 = rgb32to16(color32);
+                    canvas.fillRect(lrintf(x * cellW), lrintf(y * cellH), (int)ceilf(cellW), (int)ceilf(cellH), color16);
+                }
             }
         }
     }
@@ -346,7 +543,9 @@ static void renderFrameFLIP() {
     if (fluid) {
         int num; float *pos, *vel;
         flip_get_particles(fluid, &num, &pos, &vel);
+        if (num <= 0 || !pos || !vel) return;
         float pRadius = flip_get_particle_radius(fluid);
+
         for (int i = 0; i < num; i++) {
             float vx = vel[2*i+0], vy = vel[2*i+1];
             float v2 = vx*vx + vy*vy;
@@ -377,13 +576,16 @@ static void physicsStepFLIP(float dt) {
     }
     flip_boundary_energy = 0.0f;
 
+    int num; float *pos, *vel;
+    flip_get_particles(fluid, &num, &pos, &vel);
+    if (num <= 0 || !pos || !vel) return;
+
+    // 晶莹流体专属动力学微调已移除
+
     duck.vx += imuGX * DUCK_GRAVITY_SCALE * dt;
     duck.vy += imuGY * DUCK_GRAVITY_SCALE * dt;
     duck.lastX = duck.x; duck.lastY = duck.y;
     duck.x += duck.vx * dt; duck.y += duck.vy * dt;
-
-    int num; float *pos, *vel;
-    flip_get_particles(fluid, &num, &pos, &vel);
     float pRadius = flip_get_particle_radius(fluid);
 
     const float charRadius = CHARACTER_REGISTRY[currentCharacterIndex].radius;
@@ -483,13 +685,16 @@ static void updateVibrator() {
 
 static void initParticlesFLIP() {
     if (fluid) flip_destroy(fluid);
-    fluid = flip_create(SCREEN_W, SCREEN_H, FLIP_GRID_W, FLIP_GRID_H, FLUID_FILL_RATIO);
+    float fillRatio = FLUID_FILL_RATIO;
+    fluid = flip_create(SCREEN_W, SCREEN_H, FLIP_GRID_W, FLIP_GRID_H, fillRatio);
     if (fluid) {
         flip_set_gravity_scale(fluid, 1.0f);
         flip_set_solver_quality(fluid, FLIP_PUSH_ITERS, FLIP_PRESSURE_ITERS, FLIP_RATIO);
         
         int num;
         flip_get_particles(fluid, &num, nullptr, nullptr);
+        if (num < 0) num = 0;
+        if (num > 500) num = 500;
         particleColors.resize(num);
         for(int i=0; i<num; i++) {
             particleColors[i] = (uint8_t)random(8);
@@ -532,31 +737,15 @@ void setup() {
     Serial.printf("System Initialized. Character Count: %d\n", CHARACTER_COUNT);
     
     initClouds();
-    initParticlesFLIP();
-    float simW = 1.0f;
-    float simH = simW * ((float)FLUID_HEIGHT_BOTTLE / (float)FLUID_WIDTH_BOTTLE);
-    bottleFluid = flip_create(simW, simH, FLUID_WIDTH_BOTTLE, FLUID_HEIGHT_BOTTLE, FLUID_FILL_RATIO_BOTTLE);
-    if (bottleFluid) {
-        flip_set_gravity_scale(bottleFluid, FLUID_GRAVITY_BOTTLE);
-        flip_set_solver_quality(bottleFluid, 1, 12, 0.9f);
+    if (currentMode == MODE_FLIP) {
+        initParticlesFLIP();
+    } else {
+        initFluidForMode(currentMode);
     }
-    bottleGrid = (float*)malloc(sizeof(float) * FLUID_WIDTH_BOTTLE * FLUID_HEIGHT_BOTTLE);
 
     
-    float pRadius = flip_get_particle_radius(fluid);
-    int dia = (int)(pRadius * 2.4f);
-    if (dia < 2) dia = 2;
-
-    for (int i = 0; i < 8; i++) {
-        uint32_t c = NEON_PALETTE[i];
-        for (int b = 0; b < 2; b++) {
-            ballSprites[b][i].createSprite(dia, dia); ballSprites[b][i].fillSprite(0x0001);
-            float f = (b == 0) ? 1.0f : 1.6f; 
-            ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2, getBrightened16(c, f * 0.7f));
-            ballSprites[b][i].fillCircle(dia/2, dia/2, dia/2 - 1, getBrightened16(c, f * 1.15f));
-            ballSprites[b][i].fillCircle(dia/2 - 1, dia/2 - 1, (b == 0 ? 1 : 2), TFT_WHITE);
-        }
-    }
+    updateBallSprites(currentBallThemeIndex);
+    currentBgColor = BALL_THEMES[currentBallThemeIndex].defaultBg;
     initVibrator();
     fpsLastMs = millis();
 }
@@ -571,7 +760,9 @@ void loop() {
     
     if ((currentKbdPressed && !lastKbdPressed) || btnAPressed) {
         switch (currentMode) {
-            case MODE_FLIP: triggerExplosionFLIP(); break;
+            case MODE_FLIP:
+                triggerExplosionFLIP();
+                break;
             default: break;
         }
     }
@@ -594,17 +785,31 @@ void loop() {
         if (!btnBLongPressed && M5.BtnB.pressedFor(LONG_PRESS_MS)) {
             btnBLongPressed = true;
             // 长按：切换模式
-            currentMode = (currentMode == MODE_FLIP) ? MODE_BOTTLE : MODE_FLIP;
-            if (currentMode == MODE_BOTTLE) {
-                M5Cardputer.Display.setRotation(0);
-                canvas.deleteSprite();
-                canvas.createSprite(135, 240);
-            } else {
+            int nextMode = (int)currentMode + 1;
+            if (nextMode > MODE_BOTTLE) {
+                nextMode = MODE_FLIP;
+            }
+            currentMode = (PhysicsMode)nextMode;
+
+            if (currentMode == MODE_FLIP) {
                 M5Cardputer.Display.setRotation(1);
                 if (canvas.width() != 240) {
                     canvas.deleteSprite();
                     canvas.createSprite(240, 135);
                 }
+                initFluidForMode(currentMode); // 释放竖屏流体资源
+                initParticlesFLIP();           // 根据当前模式的粒子密度要求重建横屏物理粒子！
+            } else {
+                M5Cardputer.Display.setRotation(0);
+                if (canvas.width() != 135) {
+                    canvas.deleteSprite();
+                    canvas.createSprite(135, 240);
+                }
+                if (fluid) {
+                    flip_destroy(fluid);
+                    fluid = nullptr;
+                }
+                initFluidForMode(currentMode); // 重新分配和创建目标像素大小的竖屏流体空间
             }
             duck.x = duck.lastX = screen_to_sim_x(240 / 2.0f);
             duck.y = duck.lastY = screen_to_sim_y(135 / 2.0f);
@@ -619,10 +824,15 @@ void loop() {
     // 处理释放时的逻辑
     if (M5.BtnB.wasReleased()) {
         if (!btnBLongPressed) {
-            // 短按：仅在海洋球模式下切换主题
+            // 短按：
             if (currentMode == MODE_FLIP) {
                 switchTheme();
                 playKeyTone();
+            } else {
+                // 像素、晶莹流体与拟真海水模式下短按切换颜色调色盘
+                currentPixelPaletteIndex = (currentPixelPaletteIndex + 1) % PIXEL_PALETTE_COUNT;
+                playKeyTone();
+                Serial.printf("Pixel/Ocean Theme Switched: Index=%d\n", currentPixelPaletteIndex);
             }
         }
         btnBLongPressed = false; // 重置长按标志

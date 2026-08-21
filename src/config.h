@@ -23,8 +23,8 @@ static constexpr int    FLIP_GRID_W        = 22;    // 【FLIP 水平解算网�
 static constexpr int    FLIP_GRID_H        = 12;    // 【FLIP 垂直解算网格】调低此值 -> 网格变粗 -> 海洋球体积变大！
 static constexpr float  FLUID_FILL_RATIO   = 0.68f;  // 【流体填充比例】 配合大球，适当调低比例
 static constexpr int    FLIP_PUSH_ITERS    = 1;     // 【FLIP 粒子推离迭代】 调低为 1，让粒子在撞击时允许瞬间挤压，从而像水花一样喷射
-static constexpr int    FLIP_PRESSURE_ITERS= 22;    // 【FLIP 压力迭代】 决定流体的“不可压缩性”。值越大流体越“硬”且体积保持越好，但更耗 CPU；值越低流体越像“海绵”会被重力压缩。12 是兼顾帧率与物理体积的推荐值。
-static constexpr float  FLIP_RATIO         = 0.82f; // 【FLIP 混合因子】 过高(如0.98)会导致局部涡流(漩涡)，过低会粘稠。0.90 是极佳平衡点。
+static constexpr int    FLIP_PRESSURE_ITERS= 40;    // 【FLIP 压力迭代】 决定流体的“不可压缩性”。值越大流体越“硬”且体积保持越好，但更耗 CPU；值越低流体越像“海绵”会被重力压缩。12 是兼顾帧率与物理体积的推荐值。
+static constexpr float  FLIP_RATIO         = 0.90f; // 【FLIP 混合因子】 过高(如0.98)会导致局部涡流(漩涡)，过低会粘稠。0.90 是极佳平衡点。
 
 /**
  * [3. 视觉美学配置 - 晶莹霓虹晶体系统]
@@ -33,9 +33,21 @@ static constexpr float  FLIP_RATIO         = 0.82f; // 【FLIP 混合因子】 �
 static constexpr uint32_t COLOR_BG_BLUE    = 0x82C0E7; // 【背景色】 天空蓝
 static constexpr uint32_t COLOR_BG_ORANGE  = 0xFF9F43; // 【背景色】 活力橙
 static constexpr uint32_t COLOR_BG_GREEN   = 0x1DD1A1; // 【背景色】 海草绿
-static constexpr uint32_t COLOR_BG_DARKBLUE = 0x0A3D62; // 【背景色】 深海蓝
+static constexpr uint32_t COLOR_BG_CYAN    = 0x48DBFB; // 【背景色】 晴空蔚蓝
+static constexpr uint32_t COLOR_BG_PINK    = 0xFDA7DF; // 【背景色】 梦幻粉紫
+static constexpr uint32_t COLOR_BG_MINT    = 0x55EFC4; // 【背景色】 清新薄荷
 static constexpr uint32_t LONG_PRESS_MS    = 500;      // 【长按阈值】 毫秒
 static constexpr float  SPEED_GLINT_THRESHOLD = 240.0f;// 【闪烁阈值】 限制切换到高光状态的速度门限。越小越灵敏，越大越沉稳。
+
+// ─────────────────────────────────────────────────────────────
+//  海洋球多主题系统配置 (支持 FluidBox 水流配色与多种晶莹主题)
+// ─────────────────────────────────────────────────────────────
+struct BallTheme {
+    const char* name;
+    uint32_t    defaultBg;          // 推荐明亮背景色
+    uint32_t    palette[8];         // 8 种小球阶梯/多色调色板
+    bool        speedHighlightWhite;// 超速时是否使用纯白水花高光
+};
 
 // 霓虹晶体调色板 (极高亮度版)
 static const uint32_t NEON_PALETTE[8] = {
@@ -49,13 +61,78 @@ static const uint32_t NEON_PALETTE[8] = {
     0x00FF88  // 全息青 (Mint)
 };
 
+// 预设主题列表
+static const BallTheme BALL_THEMES[] = {
+    {
+        "FluidBox Water", // 【FluidBox 经典水体】：严格还原 esp32-fluidbox 的 4-stop 水流梯度
+        COLOR_BG_CYAN,
+        {
+            0x0A2DA5, // Stop 0: 深海静水
+            0x216ADA, // 深蓝水流
+            0x3989ED, // 蔚蓝水体
+            0x63A8F3, // 清澈天蓝
+            0x86C2F8, // 浅蓝波浪
+            0xAED8FB, // 晶亮浪花
+            0xD8EDFD, // 泛白水沫
+            0xFFFFFF  // Stop 3: 纯白飞溅
+        },
+        true // 速度超限时激起纯白水花
+    },
+    {
+        "Neon Crystal", // 【极光霓虹晶体】：多彩高饱和度晶莹小球
+        COLOR_BG_BLUE,
+        {
+            0x00FFFF, 0x00FFAA, 0x55AAFF, 0xD400FF, 
+            0xFF00FF, 0xFF5500, 0xFFCC00, 0x00FF88
+        },
+        false
+    },
+    {
+        "Pastel Candy", // 【马卡龙糖果】：柔和梦幻多色糖果球
+        COLOR_BG_PINK,
+        {
+            0xFF9AA2, 0xFFB7B2, 0xFFDAC1, 0xE2F0CB, 
+            0xB5EAD7, 0xC7CEEA, 0xFFDFD3, 0xFFFFD8
+        },
+        false
+    },
+    {
+        "Cyber Matrix", // 【赛博生化】：黑客绿与毒液青紫
+        COLOR_BG_MINT,
+        {
+            0x00FF66, 0x39FF14, 0x00FFAA, 0x00E5FF, 
+            0x76FF03, 0xCCFF00, 0x00FFCC, 0x1DE9B6
+        },
+        true
+    },
+    {
+        "Sunlit Citrus", // 【阳光夏日】：活力金黄、甜橙与蜜桃明亮果汁色
+        COLOR_BG_ORANGE,
+        {
+            0xFF8A5C, // 蜜桃甜橙
+            0xFFA502, // 鲜榨暖橙
+            0xFFC048, // 芒果黄
+            0xFFD32A, // 阳光金黄
+            0xFFE066, // 柠檬亮黄
+            0xFFEE99, // 奶油香蕉
+            0xFFF5CC, // 浅晶金光
+            0xFFFFFF  // 耀眼白光
+        },
+        true // 速度超限时激起耀眼金白光芒
+    }
+};
+static constexpr int BALL_THEME_COUNT = sizeof(BALL_THEMES) / sizeof(BALL_THEMES[0]);
+
+
+
+
 /**
  * [4. 硬件响应与防抖参数]
  */
 static constexpr float  IMU_LPF_ALPHA      = 0.92f; // 【IMU 灵敏度】 越接近 1.0 响应越快；越小感觉重心移动越平滑。
-static constexpr float  IMU_DEADZONE       = 0.18f; // 【IMU 死区过滤】 消除设备静止时的轻微抖动，防沸腾。
+static constexpr float  IMU_DEADZONE       = 0.26f; // 【IMU 死区过滤】 消除设备静止时的轻微抖动，防沸腾。
 static constexpr float  FIXED_DT           = 1.0f / 60.0f; // 【物理刷新率】 物理模拟的步长，建议锁定为 60FPS。
-static constexpr int    SUB_STEPS          = 4;     // 【计算子步】 每一帧内重复解算的倍数。值越大，大规模堆叠时越稳定、越硬。
+static constexpr int    SUB_STEPS          = 12;     // 【计算子步】 每一帧内重复解算的倍数。值越大，大规模堆叠时越稳定、越硬。
 
 // 休眠机制配置
 static constexpr float    SLEEP_IMU_THRESHOLD  = 0.05f;  // 【休眠静止阈值】加速度向量变化的判断阈值。低于此值视为静止
@@ -65,6 +142,7 @@ static constexpr uint32_t SLEEP_TIMEOUT_MS     = 60000;  // 【休眠超时时�
 // 硬件定义
 static constexpr int SCREEN_W = 240;
 static constexpr int SCREEN_H = 135;
+
 
 /**
  * [5. 交互与音效配置 - 注入物理交互之魂]
@@ -111,9 +189,22 @@ static constexpr int    FLUID_HEIGHT_BOTTLE = 48;
 static constexpr float  FLUID_FILL_RATIO_BOTTLE = 0.45f; 
 // 【初始填充比例】水箱中水的初始占比。
 // 范围：0.0 (空) ~ 1.0 (满)。0.4 ~ 0.6 效果最像“半瓶水”的动态感。
+
+static constexpr float  FLUID_FILL_RATIO_PIXEL = 0.60f; 
+// 【像素模式初始填充比例】针对无分摊点累加机制，适当拉高至 0.60f，确保整体大水体水汪汪、极度饱满充沛，同时飞散的个体依然极其干爽！
 static constexpr float  FLUID_GRAVITY_BOTTLE = 16.0f; 
 // 【重力响应强度】模拟重力对水体的拉力。
 // 建议范围：5.0 ~ 25.0。值越大水流越快、撞击感越强；值越小水体表现越粘稠、轻盈。
+
+static constexpr float  FLIP_RATIO_BOTTLE = 0.94f; 
+// 【海洋瓶物理混合因子】越高水流保留的惯性动能越多，浪花越澎湃。默认 0.94f。
+
+static constexpr float  FLIP_RATIO_PIXEL  = 0.988f; 
+// 【像素模式物理混合因子】针对 14x24 粗网格特意大幅拉高至 0.988f，能彻底打散因粗网格插值产生的厚重数字粘滞，使小水滴在晃动时呈现像珍珠或沙粒般独立喷射、漫天溅射然后完美聚拢的极客物理效果！
+
+static constexpr float  PIXEL_SPARKLE_THRESHOLD = 0.38f; 
+// 【像素水花凝聚绘制阈值】阻断双线性插值周围低比重分摊。
+// 设定在 0.35f ~ 0.42f。较低(如0.1)会让单独飞散的单颗水珠在屏幕上画成4个格子(马赛克大团)；设定为 0.38f 可确保飞溅水滴以极具极客颗粒感的“单格子”或“双格子”完美清爽呈现！
 
 static const uint32_t OCEAN_PALETTE[] = {
     0x010308, 0x001A33, 0x003366, 0x004D99, 0x0066CC, 0x0080FF, 0x4DCCFF

@@ -543,7 +543,9 @@ FlipFluid* flip_create(float sim_w, float sim_h, int visible_w, int visible_h, f
 
     int num_x = (int)floorf((rel_water_w * tank_w - 2.0f * h - 2.0f * r) / dx);
     int num_y = (int)floorf((rel_water_h * tank_h - 2.0f * h - 2.0f * r) / dy);
-    int base_particles = MAX(num_x * num_y, 1);
+    if (num_x < 1) num_x = 1;
+    if (num_y < 1) num_y = 1;
+    int base_particles = num_x * num_y;
     int max_particles = MAX(base_particles + 256, base_particles * 2);
 
     FlipFluid* f = (FlipFluid*)calloc(1, sizeof(FlipFluid));
